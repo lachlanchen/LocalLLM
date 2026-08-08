@@ -123,6 +123,7 @@ timeout 90 "$python_bin" - <<'PY'
 import asyncio
 import json
 import os
+from importlib.metadata import version
 from pathlib import Path
 
 from mcp import ClientSession
@@ -208,7 +209,9 @@ async def verify():
 
             print(
                 "RE toolchain verification PASS: "
-                f"server={initialized.serverInfo.name} {initialized.serverInfo.version}, "
+                f"package=pyghidra-mcp {version('pyghidra-mcp')}, "
+                f"server={initialized.serverInfo.name}, "
+                f"server_reported={initialized.serverInfo.version}, "
                 f"tools={len(actual_tools)}, binary={imported['name']}, "
                 f"search_hits={len(symbols)}"
             )
