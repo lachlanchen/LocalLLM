@@ -26,6 +26,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --project apps/api --locked
+      - run: uv sync --project apps/api --extra dev --locked
       - run: uv run --project apps/api ruff check apps/api
       - run: uv run --project apps/api pytest -q
