@@ -31,6 +31,7 @@ localllm-deep        → qwen3:30b-a3b-instruct-2507-q4_K_M
 localllm-max         → qwen3:30b-a3b-instruct-2507-q8_0
 localllm-vision      → qwen3-vl:8b-instruct-q4_K_M
 localllm-vision-max  → qwen3-vl:8b-instruct-q8_0
+localllm-embed       → bge-m3:latest
 ```
 
 ## Important limitations
@@ -47,4 +48,3 @@ localllm-vision-max  → qwen3-vl:8b-instruct-q8_0
 OpenAI recommends the Responses API for new projects while continuing to support Chat Completions. The official migration guide describes Responses as a unified, multimodal, agent-oriented interface: [Migrate to the Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses).
 
 The exact local subset is grounded in Ollama’s [OpenAI compatibility documentation](https://docs.ollama.com/api/openai-compatibility). Ollama added `/v1/responses` in v0.13.3; this installation uses a newer project-local Ollama release.
-

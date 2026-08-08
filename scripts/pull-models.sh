@@ -17,10 +17,14 @@ vision_models=(
   qwen3-vl:8b-instruct-q4_K_M
   qwen3-vl:8b-instruct-q8_0
 )
+embedding_models=(
+  bge-m3:latest
+)
 core_models=(
   qwen3:8b-q4_K_M
   qwen3:30b-a3b-instruct-2507-q4_K_M
   qwen3-vl:8b-instruct-q4_K_M
+  bge-m3:latest
 )
 
 if [[ ! -x "$ollama_bin" ]]; then
@@ -35,12 +39,12 @@ case "$mode" in
   core) selected_models=("${core_models[@]}") ;;
   text) selected_models=("${text_models[@]}") ;;
   vision) selected_models=("${vision_models[@]}") ;;
-  all) selected_models=("${text_models[@]}" "${vision_models[@]}") ;;
+  embedding) selected_models=("${embedding_models[@]}") ;;
+  all) selected_models=("${text_models[@]}" "${vision_models[@]}" "${embedding_models[@]}") ;;
   status) exec "$ollama_bin" list ;;
-  *) echo "Usage: $0 {core|text|vision|all|status}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {core|text|vision|embedding|all|status}" >&2; exit 2 ;;
 esac
 
 for localllm_model in "${selected_models[@]}"; do
   "$ollama_bin" pull "$localllm_model"
 done
-

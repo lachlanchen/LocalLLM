@@ -6,6 +6,7 @@ Accessed 2026-08-08 unless noted otherwise.
 
 - Qwen official GGUF cards: [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF).
 - Ollama official catalogs: [Qwen3](https://ollama.com/library/qwen3/tags), [Qwen3-VL](https://ollama.com/library/qwen3-vl/tags).
+- Embeddings: [Ollama BGE-M3](https://ollama.com/library/bge-m3), [BAAI BGE-M3 model card](https://huggingface.co/BAAI/bge-m3).
 - Ollama documentation: [OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility), [Vision](https://docs.ollama.com/capabilities/vision), [API introduction](https://docs.ollama.com/api/introduction).
 - Ollama source and releases: [ollama/ollama](https://github.com/ollama/ollama), [releases](https://github.com/ollama/ollama/releases).
 
@@ -26,4 +27,3 @@ LocalLLM does not call hosted OpenAI models. These sources define the familiar c
 ## Interpretation policy
 
 Sizes and context limits in the app are artifact metadata, not benchmark guarantees. Performance statements in this repository are framed as deployment guidance and should be measured on the actual topology after the NVIDIA driver state is healthy.
-

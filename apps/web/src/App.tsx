@@ -387,13 +387,13 @@ function ResearchView() {
 }
 
 function ModelCard({ model, progress, onPull }: { model: ModelInfo; progress?: { value: number; status: string }; onPull: (model: string) => void }) {
-  const color = model.modalities.includes('image') ? 'violet' : model.family.includes('30B') ? 'orange' : model.family.includes('8B') ? 'teal' : 'yellow'
+  const color = model.modalities.includes('image') ? 'violet' : model.modalities.includes('embedding') ? 'teal' : model.family.includes('30B') ? 'orange' : model.family.includes('8B') ? 'teal' : 'yellow'
   return (
     <article className={`model-card ${color}`}>
       <div className="model-top"><span className="model-tier">{model.tier}</span>{model.recommended && <span className="recommended"><Sparkles size={12} /> PICK</span>}</div>
-      <div className="model-icon">{model.modalities.includes('image') ? <Aperture size={25} /> : model.family.includes('30B') ? <Layers3 size={25} /> : <BrainCircuit size={25} />}</div>
+      <div className="model-icon">{model.modalities.includes('image') ? <Aperture size={25} /> : model.modalities.includes('embedding') ? <Search size={25} /> : model.family.includes('30B') ? <Layers3 size={25} /> : <BrainCircuit size={25} />}</div>
       <h3>{model.family}</h3><code>{model.quantization}</code><p>{model.role}</p>
-      <div className="model-stats"><div><strong>{model.size_gb} GB</strong><span>ON DISK</span></div><div><strong>{Math.round(model.context / 1024)}K</strong><span>CONTEXT</span></div><div><strong>{model.modalities.includes('image') ? 'VISION' : 'TEXT'}</strong><span>MODE</span></div></div>
+      <div className="model-stats"><div><strong>{model.size_gb} GB</strong><span>ON DISK</span></div><div><strong>{Math.round(model.context / 1024)}K</strong><span>CONTEXT</span></div><div><strong>{model.modalities.includes('image') ? 'VISION' : model.modalities.includes('embedding') ? 'EMBED' : 'TEXT'}</strong><span>MODE</span></div></div>
       {progress ? <div className="download-progress"><div><span>{progress.status}</span><strong>{progress.value}%</strong></div><div className="progress-bar"><span style={{ width: `${progress.value}%` }} /></div></div> : <button className={model.installed ? 'installed-button' : 'download-button'} onClick={() => !model.installed && onPull(model.id)} disabled={model.installed}>{model.installed ? <><Check size={16} /> Installed</> : <><Download size={16} /> Pull model</>}</button>}
     </article>
   )
@@ -401,7 +401,7 @@ function ModelCard({ model, progress, onPull }: { model: ModelInfo; progress?: {
 
 function ModelsView({ catalog, refresh }: { catalog: CatalogResponse | null; refresh: () => Promise<void> }) {
   const [pulls, setPulls] = useState<Record<string, { value: number; status: string }>>({})
-  const [filter, setFilter] = useState<'all' | 'text' | 'vision'>('all')
+  const [filter, setFilter] = useState<'all' | 'text' | 'vision' | 'embedding'>('all')
   const pull = async (model: string) => {
     setPulls((current) => ({ ...current, [model]: { value: 0, status: 'Starting download' } }))
     try {
@@ -412,12 +412,17 @@ function ModelsView({ catalog, refresh }: { catalog: CatalogResponse | null; ref
       setPulls((current) => ({ ...current, [model]: { value: 0, status: error instanceof Error ? error.message : 'Failed' } }))
     }
   }
-  const models = catalog?.models.filter((model) => filter === 'all' || (filter === 'vision' ? model.modalities.includes('image') : !model.modalities.includes('image'))) ?? []
+  const models = catalog?.models.filter((model) => {
+    if (filter === 'all') return true
+    if (filter === 'vision') return model.modalities.includes('image')
+    if (filter === 'embedding') return model.modalities.includes('embedding')
+    return !model.modalities.includes('image') && !model.modalities.includes('embedding')
+  }) ?? []
   const installed = catalog?.models.filter((model) => model.installed).length ?? 0
   return (
     <section className="padded-view models-view">
       <div className="models-header"><HeroTitle eyebrow="CURATED FOR DUAL RTX 4090" title="A shelf with" accent="a point of view." copy="Keep Q4 for speed and Q8 for fidelity. Every preset maps to an explicit, reproducible Ollama tag—no mystery downloads." /><div className="library-summary"><div><HardDrive size={19} /><span><strong>{catalog?.planned_download_gb ?? '—'} GB</strong> complete set</span></div><div><Check size={19} /><span><strong>{installed}/{catalog?.models.length ?? 0}</strong> installed</span></div></div></div>
-      <div className="filter-row"><div>{(['all', 'text', 'vision'] as const).map((item) => <button key={item} className={filter === item ? 'is-active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><button className="icon-text-button" onClick={() => void refresh()}><RefreshCw size={15} /> Refresh</button></div>
+      <div className="filter-row"><div>{(['all', 'text', 'vision', 'embedding'] as const).map((item) => <button key={item} className={filter === item ? 'is-active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><button className="icon-text-button" onClick={() => void refresh()}><RefreshCw size={15} /> Refresh</button></div>
       <div className="model-grid">{models.map((model) => <ModelCard key={model.id} model={model} progress={pulls[model.id]} onPull={(id) => void pull(id)} />)}</div>
       <div className="quant-note"><Gauge size={24} /><div><strong>Why both quantizations?</strong><p>Q4_K_M is the daily driver: less VRAM, larger KV cache, faster startup. Q8_0 is the comparison lane when small accuracy differences matter. The 30B Q8 spans both cards; the smaller models fit on one.</p></div></div>
     </section>
@@ -503,7 +508,7 @@ print(response.output_text)`
     <section className="padded-view api-view">
       <HeroTitle eyebrow="DROP-IN LOCAL API" title="Familiar format." accent="Private backend." copy="Point OpenAI SDKs and compatible tools at one loopback URL. Friendly aliases keep your applications independent from exact quantization tags." />
       <div className="endpoint-hero"><div className="endpoint-icon"><Server size={25} /></div><div><span>BASE URL</span><code>http://127.0.0.1:8008/v1</code></div><button onClick={() => navigator.clipboard.writeText('http://127.0.0.1:8008/v1')}><Clipboard size={17} /></button><i>LOCAL</i></div>
-      <div className="api-grid"><CodeBlock title="RESPONSES API · PYTHON" code={python} /><CodeBlock title="CHAT COMPLETIONS · CURL" code={curl} /><CodeBlock title="VISION INPUT · PYTHON" code={vision} /><div className="alias-card"><div className="panel-kicker"><Layers3 size={17} /><span>STABLE MODEL ALIASES</span></div>{[['localllm-pocket', 'Qwen3 4B Q4'], ['localllm-fast', 'Qwen3 8B Q4'], ['localllm-deep', 'Qwen3 30B Q4'], ['localllm-max', 'Qwen3 30B Q8'], ['localllm-vision', 'Qwen3-VL 8B Q4']].map(([alias, target]) => <div key={alias}><code>{alias}</code><ArrowRight size={13} /><span>{target}</span></div>)}</div></div>
+      <div className="api-grid"><CodeBlock title="RESPONSES API · PYTHON" code={python} /><CodeBlock title="CHAT COMPLETIONS · CURL" code={curl} /><CodeBlock title="VISION INPUT · PYTHON" code={vision} /><div className="alias-card"><div className="panel-kicker"><Layers3 size={17} /><span>STABLE MODEL ALIASES</span></div>{[['localllm-pocket', 'Qwen3 4B Q4'], ['localllm-fast', 'Qwen3 8B Q4'], ['localllm-deep', 'Qwen3 30B Q4'], ['localllm-max', 'Qwen3 30B Q8'], ['localllm-vision', 'Qwen3-VL 8B Q4'], ['localllm-embed', 'BGE-M3 embeddings']].map(([alias, target]) => <div key={alias}><code>{alias}</code><ArrowRight size={13} /><span>{target}</span></div>)}</div></div>
       <div className="api-features"><div><MessageCircleMore /><strong>Chat Completions</strong><code>POST /v1/chat/completions</code></div><div><Sparkles /><strong>Responses</strong><code>POST /v1/responses</code></div><div><Boxes /><strong>Models</strong><code>GET /v1/models</code></div><div><BrainCircuit /><strong>Embeddings</strong><code>POST /v1/embeddings</code></div></div>
       <div className="api-note"><KeyRound size={21} /><div><strong>Authentication that local tools understand</strong><p>Use <code>local-dev-key</code> by default or set <code>LOCALLLM_API_KEY</code>. The server binds to loopback unless you deliberately change it.</p></div></div>
     </section>

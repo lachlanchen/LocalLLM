@@ -37,13 +37,13 @@ scripts/run.sh
 
 Open <http://127.0.0.1:8008>. The service binds to loopback by default.
 
-Pull the three practical daily models (about 30 GB):
+Pull the three practical daily models plus multilingual embeddings (about 32 GB):
 
 ```bash
 scripts/pull-models.sh core
 ```
 
-Pull every requested Q4 and Q8 comparison model (88 GB):
+Pull every requested Q4/Q8 comparison model plus embeddings (about 89 GB):
 
 ```bash
 scripts/pull-models.sh all
@@ -57,6 +57,7 @@ scripts/pull-models.sh all
 | Daily assistant | `qwen3:8b-q4_K_M` / `qwen3:8b-q8_0` | 5.2 / 8.9 GB | `localllm-fast`, `localllm-balanced` |
 | Research and RE | `qwen3:30b-a3b-instruct-2507-q4_K_M` / `...q8_0` | 19 / 32 GB | `localllm-deep`, `localllm-max` |
 | Vision and OCR | `qwen3-vl:8b-instruct-q4_K_M` / `...q8_0` | 6.1 / 9.8 GB | `localllm-vision`, `localllm-vision-max` |
+| Retrieval and RAG | `bge-m3:latest` | 1.2 GB | `localllm-embed` |
 
 Q4_K_M is the normal lane: lower VRAM, faster startup, and more room for KV cache. Q8_0 is deliberately kept as a fidelity comparison. See [the model and hardware guide](references/model-selection.md) for context and realistic expectations.
 

@@ -8,6 +8,7 @@ LocalLLM keeps four capability levels and two quantization lanes:
 2. Qwen3 8B for daily chat, coding, and fast tool loops.
 3. Qwen3 30B-A3B Instruct 2507 for deeper research and reverse engineering.
 4. Qwen3-VL 8B Instruct for screenshots, OCR, diagrams, and image Q&A.
+5. BGE-M3 for multilingual semantic search and the embeddings API.
 
 Q4_K_M is the default. Q8_0 is installed for controlled fidelity comparisons, not because it is automatically better for every task.
 
@@ -23,8 +24,9 @@ Q4_K_M is the default. Q8_0 is installed for controlled fidelity comparisons, no
 | `qwen3:30b-a3b-instruct-2507-q8_0` | 32 GB | 256K | two 4090s |
 | `qwen3-vl:8b-instruct-q4_K_M` | 6.1 GB | 256K | one GPU |
 | `qwen3-vl:8b-instruct-q8_0` | 9.8 GB | 256K | one GPU |
+| `bge-m3:latest` | 1.2 GB | 8K | CPU or one GPU; 1024-dimensional embeddings |
 
-The complete requested set is approximately 88 GB before filesystem overhead. The `core` set—8B Q4, 30B Q4, and VL 8B Q4—is approximately 30 GB.
+The complete set is approximately 89.2 GB before filesystem overhead. The `core` set—8B Q4, 30B Q4, VL 8B Q4, and BGE-M3—is approximately 31.5 GB.
 
 ## Context is not free
 
@@ -55,4 +57,5 @@ The app’s system panel uses NVML through `nvidia-smi`. Ollama also performs it
 - [Qwen3 30B-A3B GGUF model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF)
 - [Ollama Qwen3 tags](https://ollama.com/library/qwen3/tags)
 - [Ollama Qwen3-VL tags](https://ollama.com/library/qwen3-vl/tags)
-
+- [Ollama BGE-M3](https://ollama.com/library/bge-m3)
+- [BAAI BGE-M3 model card](https://huggingface.co/BAAI/bge-m3)

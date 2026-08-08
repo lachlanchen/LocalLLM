@@ -91,6 +91,17 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "role": "High-fidelity OCR and detailed visual inspection",
         "recommended": False,
     },
+    {
+        "id": "bge-m3:latest",
+        "family": "BGE-M3 567M",
+        "quantization": "EMBED",
+        "size_gb": 1.2,
+        "context": 8192,
+        "modalities": ["embedding"],
+        "tier": "Retrieve",
+        "role": "Multilingual semantic search and RAG embeddings",
+        "recommended": True,
+    },
 ]
 
 MODEL_ALIASES = {
@@ -101,6 +112,7 @@ MODEL_ALIASES = {
     "localllm-max": "qwen3:30b-a3b-instruct-2507-q8_0",
     "localllm-vision": "qwen3-vl:8b-instruct-q4_K_M",
     "localllm-vision-max": "qwen3-vl:8b-instruct-q8_0",
+    "localllm-embed": "bge-m3:latest",
 }
 
 
