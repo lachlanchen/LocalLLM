@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use LocalLLM Studio in research or software, please cite it as follows."
+type: software
+title: "LocalLLM Studio"
+authors:
+  - family-names: Chen
+    given-names: Lachlan
+repository-code: "https://github.com/lachlanchen/LocalLLM"
+url: "https://github.com/lachlanchen/LocalLLM"
+license: MIT
+version: 0.1.0
+date-released: 2026-08-08
+

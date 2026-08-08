@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ollama_bin="$project_root/.local/ollama/bin/ollama"
+mode="${1:-core}"
+
+text_models=(
+  qwen3:4b-q4_K_M
+  qwen3:4b-q8_0
+  qwen3:8b-q4_K_M
+  qwen3:8b-q8_0
+  qwen3:30b-a3b-instruct-2507-q4_K_M
+  qwen3:30b-a3b-instruct-2507-q8_0
+)
+vision_models=(
+  qwen3-vl:8b-instruct-q4_K_M
+  qwen3-vl:8b-instruct-q8_0
+)
+core_models=(
+  qwen3:8b-q4_K_M
+  qwen3:30b-a3b-instruct-2507-q4_K_M
+  qwen3-vl:8b-instruct-q4_K_M
+)
+
+if [[ ! -x "$ollama_bin" ]]; then
+  "$project_root/scripts/install-ollama-local.sh"
+fi
+if ! curl -fsS http://127.0.0.1:11434/api/version >/dev/null; then
+  echo "Ollama is not running. Start it with scripts/start-ollama.sh" >&2
+  exit 1
+fi
+
+case "$mode" in
+  core) selected_models=("${core_models[@]}") ;;
+  text) selected_models=("${text_models[@]}") ;;
+  vision) selected_models=("${vision_models[@]}") ;;
+  all) selected_models=("${text_models[@]}" "${vision_models[@]}") ;;
+  status) exec "$ollama_bin" list ;;
+  *) echo "Usage: $0 {core|text|vision|all|status}" >&2; exit 2 ;;
+esac
+
+for localllm_model in "${selected_models[@]}"; do
+  "$ollama_bin" pull "$localllm_model"
+done
+

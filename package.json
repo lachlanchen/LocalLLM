@@ -1,0 +1,17 @@
+{
+  "name": "localllm-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A bright, private control room for local language, vision, research, and reverse-engineering models.",
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "test": "npm --workspace apps/web run test",
+    "lint": "npm --workspace apps/web run lint"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+

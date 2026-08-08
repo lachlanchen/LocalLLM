@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from typing import Any
+
+MODEL_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "qwen3:4b-q4_K_M",
+        "family": "Qwen3 4B",
+        "quantization": "Q4_K_M",
+        "size_gb": 2.6,
+        "context": 40960,
+        "modalities": ["text"],
+        "tier": "Pocket",
+        "role": "Fast experiments and lightweight assistants",
+        "recommended": False,
+    },
+    {
+        "id": "qwen3:4b-q8_0",
+        "family": "Qwen3 4B",
+        "quantization": "Q8_0",
+        "size_gb": 4.4,
+        "context": 40960,
+        "modalities": ["text"],
+        "tier": "Pocket+",
+        "role": "Small-model quality comparisons",
+        "recommended": False,
+    },
+    {
+        "id": "qwen3:8b-q4_K_M",
+        "family": "Qwen3 8B",
+        "quantization": "Q4_K_M",
+        "size_gb": 5.2,
+        "context": 40960,
+        "modalities": ["text", "tools"],
+        "tier": "Fast",
+        "role": "Low-latency chat, coding, and tool loops",
+        "recommended": True,
+    },
+    {
+        "id": "qwen3:8b-q8_0",
+        "family": "Qwen3 8B",
+        "quantization": "Q8_0",
+        "size_gb": 8.9,
+        "context": 40960,
+        "modalities": ["text", "tools"],
+        "tier": "Fast+",
+        "role": "Higher-fidelity everyday assistant",
+        "recommended": False,
+    },
+    {
+        "id": "qwen3:30b-a3b-instruct-2507-q4_K_M",
+        "family": "Qwen3 30B-A3B",
+        "quantization": "Q4_K_M",
+        "size_gb": 19.0,
+        "context": 262144,
+        "modalities": ["text", "tools"],
+        "tier": "Deep",
+        "role": "Primary research, coding, and reverse-engineering agent",
+        "recommended": True,
+    },
+    {
+        "id": "qwen3:30b-a3b-instruct-2507-q8_0",
+        "family": "Qwen3 30B-A3B",
+        "quantization": "Q8_0",
+        "size_gb": 32.0,
+        "context": 262144,
+        "modalities": ["text", "tools"],
+        "tier": "Deep+",
+        "role": "Maximum local text fidelity across both GPUs",
+        "recommended": False,
+    },
+    {
+        "id": "qwen3-vl:8b-instruct-q4_K_M",
+        "family": "Qwen3-VL 8B",
+        "quantization": "Q4_K_M",
+        "size_gb": 6.1,
+        "context": 262144,
+        "modalities": ["text", "image", "tools"],
+        "tier": "Vision",
+        "role": "Fast OCR, screenshots, diagrams, and visual Q&A",
+        "recommended": True,
+    },
+    {
+        "id": "qwen3-vl:8b-instruct-q8_0",
+        "family": "Qwen3-VL 8B",
+        "quantization": "Q8_0",
+        "size_gb": 9.8,
+        "context": 262144,
+        "modalities": ["text", "image", "tools"],
+        "tier": "Vision+",
+        "role": "High-fidelity OCR and detailed visual inspection",
+        "recommended": False,
+    },
+]
+
+MODEL_ALIASES = {
+    "localllm-pocket": "qwen3:4b-q4_K_M",
+    "localllm-fast": "qwen3:8b-q4_K_M",
+    "localllm-balanced": "qwen3:8b-q8_0",
+    "localllm-deep": "qwen3:30b-a3b-instruct-2507-q4_K_M",
+    "localllm-max": "qwen3:30b-a3b-instruct-2507-q8_0",
+    "localllm-vision": "qwen3-vl:8b-instruct-q4_K_M",
+    "localllm-vision-max": "qwen3-vl:8b-instruct-q8_0",
+}
+
+
+def resolve_model(model: str) -> str:
+    return MODEL_ALIASES.get(model, model)
