@@ -4,6 +4,7 @@
 
 [![React](https://img.shields.io/badge/React-19-20201e?style=flat-square&logo=react)](apps/web)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141-20201e?style=flat-square&logo=fastapi)](apps/api)
+[![CI](https://github.com/lachlanchen/LocalLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/lachlanchen/LocalLLM/actions/workflows/ci.yml)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-685bc7?style=flat-square)](references/openai-api-compatibility.md)
 [![Local-first](https://img.shields.io/badge/privacy-local--first-2aa98e?style=flat-square)](#privacy-and-safety)
 

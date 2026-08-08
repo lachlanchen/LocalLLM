@@ -116,7 +116,7 @@ function AppHeader({ status, onRefresh }: { status: SystemStatus | null; onRefre
           <StatusDot ok={status?.ollama.ok} />
           <span>Ollama {status?.ollama.version ?? 'offline'}</span>
         </button>
-        <div className="system-pill">
+        <div className="system-pill" title={status?.gpu.diagnosis ?? gpuLabel}>
           <StatusDot ok={status?.gpu.ok} />
           <span>{gpuLabel}</span>
         </div>
