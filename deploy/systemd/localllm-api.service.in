@@ -10,7 +10,6 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectControlGroups=true
-ProtectKernelModules=true
 ProtectKernelTunables=true
 RestrictRealtime=true
 RestrictSUIDSGID=true

@@ -4,6 +4,7 @@ These notes preserve the design decisions, source trail, operational boundaries,
 
 | Document | Use it when… |
 | --- | --- |
+| [Verification report](verification-report.md) | reviewing the resolved nine-model manifest, provisional pre-reboot measurements, service handoff, and final local quality evidence |
 | [Model selection](model-selection.md) | choosing Q4/Q8, text/vision, one/two-GPU layouts, or context limits |
 | [llama.cpp runtime](llama-cpp.md) | building the pinned CUDA alternative runtime or serving a GGUF model on a loopback OpenAI-compatible API |
 | [Deep Research](deep-research.md) | understanding search, extraction, citations, limitations, and prompt-injection defenses |

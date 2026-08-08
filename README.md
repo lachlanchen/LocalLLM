@@ -195,6 +195,7 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 ## Documentation map
 
 - [Reference index](references/README.md)
+- [Local verification report](references/verification-report.md)
 - [Model selection and dual-4090 layout](references/model-selection.md)
 - [Pinned llama.cpp CUDA alternative](references/llama-cpp.md)
 - [Deep Research design](references/deep-research.md)
