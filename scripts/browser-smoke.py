@@ -18,11 +18,20 @@ def run() -> dict[str, object]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     screenshots: list[str] = []
     checks: dict[str, object] = {}
+    console_errors: list[str] = []
+    page_errors: list[str] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
         context = browser.contexts[0]
         pages = [candidate for candidate in context.pages if candidate.url.startswith(APP_URL)]
         page = pages[0] if pages else context.new_page()
+        page.on(
+            "console",
+            lambda message: console_errors.append(message.text)
+            if message.type == "error"
+            else None,
+        )
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.bring_to_front()
         page.goto(APP_URL, wait_until="networkidle")
         workspace = page.get_by_test_id("workspace")
@@ -73,11 +82,34 @@ def run() -> dict[str, object]:
         page.bring_to_front()
         browser.close()
 
+    failures: list[str] = []
+    expected = {
+        "title": "LocalLLM Studio",
+        "workspaceStatus": "ready",
+        "initialView": "chat",
+        "modelCards": 9,
+        "apiCodeCards": 3,
+        "sendEnabledAfterTyping": True,
+    }
+    for name, value in expected.items():
+        if checks.get(name) != value:
+            failures.append(f"{name}: expected {value!r}, got {checks.get(name)!r}")
+    if checks.get("mobileScrollWidth") != checks.get("mobileClientWidth"):
+        failures.append(
+            "mobile viewport overflows horizontally: "
+            f"{checks.get('mobileScrollWidth')} > {checks.get('mobileClientWidth')}"
+        )
+    if console_errors:
+        failures.append(f"browser console errors: {console_errors}")
+    if page_errors:
+        failures.append(f"uncaught page errors: {page_errors}")
+
     result = {
         "url": APP_URL,
         "title": checks.get("title"),
-        "status": "passed",
+        "status": "failed" if failures else "passed",
         "checks": checks,
+        "failures": failures,
         "screenshots": screenshots,
     }
     status_path = EVIDENCE_DIR / f"{timestamp}-status.json"
@@ -87,4 +119,6 @@ def run() -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(run(), indent=2))
+    outcome = run()
+    print(json.dumps(outcome, indent=2))
+    raise SystemExit(1 if outcome["status"] == "failed" else 0)

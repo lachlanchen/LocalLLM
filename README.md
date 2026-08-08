@@ -138,6 +138,7 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 ## Privacy and safety
 
 - App, Ollama, noVNC, and MCP examples bind to `127.0.0.1` by default.
+- Browser mutations enforce an origin/fetch-site boundary, HTTP hosts are allowlisted, and the app emits a restrictive content-security policy plus anti-framing headers.
 - Model weights, prompts, uploads, research reports, runtime logs, and reverse-engineering projects live under ignored local directories.
 - Binary Studio never executes an uploaded binary. It enforces a 64 MB limit and performs static inspection only.
 - Binary strings and fetched webpages are treated as untrusted data, not model instructions.
