@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
+import socket
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import trafilatura
@@ -141,6 +143,36 @@ class ResearchManager:
         return sources
 
     @staticmethod
+    async def _is_public_http_url(url: str) -> bool:
+        parsed = urlparse(url)
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or port not in {None, 80, 443}
+        ):
+            return False
+        try:
+            addresses = [ipaddress.ip_address(parsed.hostname)]
+        except ValueError:
+            try:
+                records = await asyncio.to_thread(
+                    socket.getaddrinfo,
+                    parsed.hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+            except socket.gaierror:
+                return False
+            addresses = list({ipaddress.ip_address(record[4][0]) for record in records})
+        return bool(addresses) and all(address.is_global for address in addresses)
+
+    @staticmethod
     def _clean_extracted_text(text: str) -> str:
         """Remove embedded payloads that consume context without adding evidence."""
         text = re.sub(
@@ -154,13 +186,46 @@ class ResearchManager:
     @staticmethod
     async def _fetch_source(client: httpx.AsyncClient, source: ResearchSource) -> None:
         try:
-            response = await client.get(source.url, follow_redirects=True)
-            response.raise_for_status()
-            if len(response.content) > 5_000_000:
+            current_url = source.url
+            response_text = ""
+            for _redirect in range(5):
+                if not await ResearchManager._is_public_http_url(current_url):
+                    return
+                async with client.stream("GET", current_url, follow_redirects=False) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            return
+                        current_url = urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    media_type = response.headers.get("content-type", "").split(";", 1)[0]
+                    if not (
+                        media_type.startswith("text/")
+                        or media_type in {"application/xhtml+xml", "application/xml"}
+                    ):
+                        return
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            if int(content_length) > 5_000_000:
+                                return
+                        except ValueError:
+                            pass
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 5_000_000:
+                            return
+                    encoding = response.encoding or "utf-8"
+                    response_text = bytes(body).decode(encoding, errors="replace")
+                    source.url = str(response.url)
+                    break
+            if not response_text:
                 return
             text = await asyncio.to_thread(
                 trafilatura.extract,
-                response.text,
+                response_text,
                 include_comments=False,
                 include_tables=True,
                 favor_precision=True,

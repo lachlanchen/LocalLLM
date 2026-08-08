@@ -16,7 +16,7 @@ question
 
 1. **Plan**: generate several search angles. If the model is unavailable or produces invalid JSON, deterministic fallback queries keep the run inspectable.
 2. **Search**: use DDGS to discover candidate pages. No prompt content is sent to OpenAI or another model API.
-3. **Read**: fetch pages with a descriptive user agent, enforce response-size and connection limits, extract main content, and strip embedded base64/data payloads before they can consume model context.
+3. **Read**: fetch pages with a descriptive user agent, reject private/reserved network targets and unsafe redirects, stream through a 5 MB response cap, extract main content, and strip embedded base64/data payloads before they can consume model context.
 4. **Synthesize**: number every source, prefer primary evidence when sources conflict, require inline `[1]` citations, distinguish facts from inference, and preserve uncertainty. A citation-repair pass runs when the first draft has no valid numbered citations.
 5. **Persist**: save the task, progress, sources, and report under `data/research/`.
 
