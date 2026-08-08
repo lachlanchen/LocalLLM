@@ -94,7 +94,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "bge-m3:latest",
         "family": "BGE-M3 567M",
-        "quantization": "EMBED",
+        "quantization": "F16",
         "size_gb": 1.2,
         "context": 8192,
         "modalities": ["embedding"],
