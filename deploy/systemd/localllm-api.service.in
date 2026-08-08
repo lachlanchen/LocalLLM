@@ -6,6 +6,14 @@ Wants=localllm-ollama.service
 [Service]
 Type=simple
 WorkingDirectory=@PROJECT_ROOT@
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 EnvironmentFile=-@PROJECT_ROOT@/.env
 ExecStart=@PROJECT_ROOT@/apps/api/.venv/bin/uvicorn localllm.main:app --app-dir @PROJECT_ROOT@/apps/api --host 127.0.0.1 --port 8008
 Restart=on-failure
@@ -13,4 +21,3 @@ RestartSec=3
 
 [Install]
 WantedBy=default.target
-

@@ -7,7 +7,13 @@ http://127.0.0.1:8008/v1
 Authorization: Bearer local-dev-key
 ```
 
-Set `LOCALLLM_API_KEY` to replace the default. The management UI uses same-origin `/api/*` routes. The OpenAI-shaped `/v1/*` routes require the configured key.
+`LOCALLLM_API_KEY` gates only `/v1/*`; setting it to an empty value disables
+that check. The shipped `local-dev-key` is an interoperability placeholder, not
+a secret. Management `/api/*` routes do not consult this key. Every route relies
+on the loopback peer restriction; all browser requests to `/api/*` and `/v1/*`
+additionally receive `Origin`/`Sec-Fetch-Site` checks. A
+native process in the same host network namespace can invoke them. Do not proxy
+or tunnel port 8008 without adding authentication and authorization.
 
 ## Endpoints
 
@@ -43,8 +49,25 @@ localllm-embed       → bge-m3:latest
 - The app’s Deep Research pipeline is a separate local orchestration route, not an OpenAI hosted tool.
 - Context size is configured at model/runtime level; it is not inferred from an OpenAI request.
 
+## Verify with the official Python SDK
+
+After installing the core models and starting LocalLLM, run the contract probe:
+
+```bash
+uv run --project apps/api --extra dev python scripts/verify-openai-api.py
+```
+
+It exercises model listing, Chat Completions (including streaming), Responses, a forced Chat Completions function call, JSON mode, and 1024-dimensional BGE-M3 embeddings through the official `openai` package. Once a Qwen3-VL alias is installed, include a local image to exercise the multimodal request shape as well:
+
+```bash
+uv run --project apps/api --extra dev python scripts/verify-openai-api.py \
+  --image /absolute/path/to/interface.png
+```
+
+Streaming requests are preflighted before response headers are sent, so an upstream Ollama 4xx/5xx remains an OpenAI-shaped HTTP error instead of becoming a misleading `200` event stream.
+
 ## Official contract sources
 
 OpenAI recommends the Responses API for new projects while continuing to support Chat Completions. The official migration guide describes Responses as a unified, multimodal, agent-oriented interface: [Migrate to the Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses).
 
-The exact local subset is grounded in Ollama’s [OpenAI compatibility documentation](https://docs.ollama.com/api/openai-compatibility). Ollama added `/v1/responses` in v0.13.3; this installation uses a newer project-local Ollama release.
+The exact local subset is grounded in Ollama’s [OpenAI compatibility documentation](https://docs.ollama.com/api/openai-compatibility). The project installer pins Ollama v0.32.6 and the Linux amd64 archive SHA-256 `dec2fa50d24e6868ca3c4c977d69d059399372105f951a9acc320a5a79aadcfc`.

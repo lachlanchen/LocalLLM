@@ -22,8 +22,19 @@ embedding_models=(
 )
 core_models=(
   qwen3:8b-q4_K_M
-  qwen3:30b-a3b-instruct-2507-q4_K_M
   qwen3-vl:8b-instruct-q4_K_M
+  qwen3:30b-a3b-instruct-2507-q4_K_M
+  bge-m3:latest
+)
+all_models=(
+  qwen3:4b-q4_K_M
+  qwen3:4b-q8_0
+  qwen3:8b-q4_K_M
+  qwen3-vl:8b-instruct-q4_K_M
+  qwen3:30b-a3b-instruct-2507-q4_K_M
+  qwen3:8b-q8_0
+  qwen3-vl:8b-instruct-q8_0
+  qwen3:30b-a3b-instruct-2507-q8_0
   bge-m3:latest
 )
 
@@ -40,9 +51,22 @@ case "$mode" in
   text) selected_models=("${text_models[@]}") ;;
   vision) selected_models=("${vision_models[@]}") ;;
   embedding) selected_models=("${embedding_models[@]}") ;;
-  all) selected_models=("${text_models[@]}" "${vision_models[@]}" "${embedding_models[@]}") ;;
+  all) selected_models=("${all_models[@]}") ;;
   status) exec "$ollama_bin" list ;;
-  *) echo "Usage: $0 {core|text|vision|embedding|all|status}" >&2; exit 2 ;;
+  verify)
+    installed="$($ollama_bin list | awk 'NR > 1 {print $1}')"
+    missing=0
+    for localllm_model in "${all_models[@]}"; do
+      if ! grep -Fxq "$localllm_model" <<<"$installed"; then
+        echo "MISSING $localllm_model"
+        missing=1
+      else
+        echo "OK      $localllm_model"
+      fi
+    done
+    exit "$missing"
+    ;;
+  *) echo "Usage: $0 {core|text|vision|embedding|all|status|verify}" >&2; exit 2 ;;
 esac
 
 for localllm_model in "${selected_models[@]}"; do

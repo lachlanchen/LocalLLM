@@ -5,6 +5,14 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@PROJECT_ROOT@
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 Environment=OLLAMA_HOST=127.0.0.1:11434
 Environment=OLLAMA_MODELS=@PROJECT_ROOT@/.local/models/ollama
 Environment=OLLAMA_KEEP_ALIVE=15m
@@ -14,4 +22,3 @@ RestartSec=3
 
 [Install]
 WantedBy=default.target
-

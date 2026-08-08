@@ -1,0 +1,366 @@
+diff --git a/OGhidraMCP/Module.manifest b/OGhidraMCP/Module.manifest
+index 605cd18..e69de29 100644
+--- a/OGhidraMCP/Module.manifest
++++ b/OGhidraMCP/Module.manifest
+@@ -1,2 +0,0 @@
+-GHIDRA_MODULE_NAME=OGhidraMCP
+-GHIDRA_MODULE_DESC=Extended GhidraMCP - HTTP server plugin for AI-assisted Ghidra analysis
+diff --git a/OGhidraMCP/src/main/java/com/lauriewired/GhidraMCPPlugin.java b/OGhidraMCP/src/main/java/com/lauriewired/GhidraMCPPlugin.java
+index f98fb8f..6f766e6 100644
+--- a/OGhidraMCP/src/main/java/com/lauriewired/GhidraMCPPlugin.java
++++ b/OGhidraMCP/src/main/java/com/lauriewired/GhidraMCPPlugin.java
+@@ -60,6 +60,8 @@ import ghidra.app.decompiler.ClangToken;
+ import ghidra.framework.options.Options;
+
+ import com.sun.net.httpserver.HttpExchange;
++import com.sun.net.httpserver.Filter;
++import com.sun.net.httpserver.HttpHandler;
+ import com.sun.net.httpserver.HttpServer;
+
+ import javax.swing.SwingUtilities;
+@@ -68,6 +70,7 @@ import java.io.OutputStream;
+ import java.lang.reflect.InvocationTargetException;
+ import java.net.InetSocketAddress;
+ import java.net.ServerSocket;
++import java.net.URI;
+ import java.net.URLDecoder;
+ import java.nio.charset.StandardCharsets;
+ import java.util.*;
+@@ -84,6 +87,7 @@ public class GhidraMCPPlugin extends Plugin {
+     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
+     private static final String PORT_OPTION_NAME = "Server Port";
+     private static final int DEFAULT_PORT = 8080;
++    private static final String LOOPBACK_ADDRESS = "127.0.0.1";
+
+     // Multi-instance support
+     public static final Map<Integer, GhidraMCPPlugin> activeInstances = new ConcurrentHashMap<>();
+@@ -131,18 +135,18 @@ public class GhidraMCPPlugin extends Plugin {
+         // Register this instance
+         activeInstances.put(this.currentPort, this);
+
+-        server = HttpServer.create(new InetSocketAddress(this.currentPort), 0);
++        server = HttpServer.create(new InetSocketAddress(LOOPBACK_ADDRESS, this.currentPort), 0);
+
+         // --- NEW DISCOVERY ENDPOINTS (For GhydraMCP Compatibility) ---
+
+         // Plugin version endpoint (used for discovery)
+-        server.createContext("/plugin-version", exchange -> {
++        createLocalContext("/plugin-version", exchange -> {
+             String json = "{\"result\": {\"plugin_version\": \"Custom-OGhidraMCP\", \"api_version\": \"1.0\"}}";
+             sendJsonResponse(exchange, json);
+         });
+
+         // Program info endpoint (used for instance info)
+-        server.createContext("/program", exchange -> {
++        createLocalContext("/program", exchange -> {
+             Program prog = getCurrentProgram();
+             if (prog != null) {
+                 String name = prog.getName();
+@@ -155,21 +159,21 @@ public class GhidraMCPPlugin extends Plugin {
+         });
+
+         // Each listing endpoint uses offset & limit from query params:
+-        server.createContext("/methods", exchange -> {
++        createLocalContext("/methods", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, getAllFunctionNames(offset, limit));
+         });
+
+-        server.createContext("/classes", exchange -> {
++        createLocalContext("/classes", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, getAllClassNames(offset, limit));
+         });
+
+-        server.createContext("/decompile", exchange -> {
++        createLocalContext("/decompile", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+@@ -177,7 +181,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, decompileFunctionByName(name, offset, limit));
+         });
+
+-        server.createContext("/renameFunction", exchange -> {
++        createLocalContext("/renameFunction", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String response = renameFunction(params.get("oldName"), params.get("newName"))
+                     ? "Renamed successfully"
+@@ -185,13 +189,13 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, response);
+         });
+
+-        server.createContext("/renameData", exchange -> {
++        createLocalContext("/renameData", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             renameDataAtAddress(params.get("address"), params.get("newName"));
+             sendResponse(exchange, "Rename data attempted");
+         });
+
+-        server.createContext("/renameVariable", exchange -> {
++        createLocalContext("/renameVariable", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String functionName = params.get("functionName");
+             String oldName = params.get("oldName");
+@@ -200,42 +204,42 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, result);
+         });
+
+-        server.createContext("/segments", exchange -> {
++        createLocalContext("/segments", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listSegments(offset, limit));
+         });
+
+-        server.createContext("/imports", exchange -> {
++        createLocalContext("/imports", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listImports(offset, limit));
+         });
+
+-        server.createContext("/exports", exchange -> {
++        createLocalContext("/exports", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listExports(offset, limit));
+         });
+
+-        server.createContext("/namespaces", exchange -> {
++        createLocalContext("/namespaces", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listNamespaces(offset, limit));
+         });
+
+-        server.createContext("/data", exchange -> {
++        createLocalContext("/data", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listDefinedData(offset, limit));
+         });
+
+-        server.createContext("/searchFunctions", exchange -> {
++        createLocalContext("/searchFunctions", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String searchTerm = qparams.get("query");
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+@@ -245,28 +249,28 @@ public class GhidraMCPPlugin extends Plugin {
+
+         // New API endpoints based on requirements
+
+-        server.createContext("/get_function_by_address", exchange -> {
++        createLocalContext("/get_function_by_address", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             sendResponse(exchange, getFunctionByAddress(address));
+         });
+
+-        server.createContext("/get_current_address", exchange -> {
++        createLocalContext("/get_current_address", exchange -> {
+             sendResponse(exchange, getCurrentAddress());
+         });
+
+-        server.createContext("/get_current_function", exchange -> {
++        createLocalContext("/get_current_function", exchange -> {
+             sendResponse(exchange, getCurrentFunction());
+         });
+
+-        server.createContext("/list_functions", exchange -> {
++        createLocalContext("/list_functions", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+             sendResponse(exchange, listFunctions(offset, limit));
+         });
+
+-        server.createContext("/decompile_function", exchange -> {
++        createLocalContext("/decompile_function", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+@@ -274,13 +278,13 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, decompileFunctionByAddress(address, offset, limit));
+         });
+
+-        server.createContext("/disassemble_function", exchange -> {
++        createLocalContext("/disassemble_function", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             sendResponse(exchange, disassembleFunction(address));
+         });
+
+-        server.createContext("/set_decompiler_comment", exchange -> {
++        createLocalContext("/set_decompiler_comment", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String address = params.get("address");
+             String comment = params.get("comment");
+@@ -288,7 +292,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+         });
+
+-        server.createContext("/set_disassembly_comment", exchange -> {
++        createLocalContext("/set_disassembly_comment", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String address = params.get("address");
+             String comment = params.get("comment");
+@@ -296,7 +300,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+         });
+
+-        server.createContext("/rename_function_by_address", exchange -> {
++        createLocalContext("/rename_function_by_address", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String functionAddress = params.get("function_address");
+             String newName = params.get("new_name");
+@@ -304,7 +308,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, success ? "Function renamed successfully" : "Failed to rename function");
+         });
+
+-        server.createContext("/set_function_prototype", exchange -> {
++        createLocalContext("/set_function_prototype", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String functionAddress = params.get("function_address");
+             String prototype = params.get("prototype");
+@@ -325,7 +329,7 @@ public class GhidraMCPPlugin extends Plugin {
+             }
+         });
+
+-        server.createContext("/set_local_variable_type", exchange -> {
++        createLocalContext("/set_local_variable_type", exchange -> {
+             Map<String, String> params = parsePostParams(exchange);
+             String functionAddress = params.get("function_address");
+             String variableName = params.get("variable_name");
+@@ -366,7 +370,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, responseMsg.toString());
+         });
+
+-        server.createContext("/xrefs_to", exchange -> {
++        createLocalContext("/xrefs_to", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+@@ -374,7 +378,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, getXrefsTo(address, offset, limit));
+         });
+
+-        server.createContext("/xrefs_from", exchange -> {
++        createLocalContext("/xrefs_from", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+@@ -382,7 +386,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, getXrefsFrom(address, offset, limit));
+         });
+
+-        server.createContext("/function_xrefs", exchange -> {
++        createLocalContext("/function_xrefs", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String name = qparams.get("name");
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+@@ -390,7 +394,7 @@ public class GhidraMCPPlugin extends Plugin {
+             sendResponse(exchange, getFunctionXrefs(name, offset, limit));
+         });
+
+-        server.createContext("/strings", exchange -> {
++        createLocalContext("/strings", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             int offset = parseIntOrDefault(qparams.get("offset"), 0);
+             int limit = parseIntOrDefault(qparams.get("limit"), 100);
+@@ -399,7 +403,7 @@ public class GhidraMCPPlugin extends Plugin {
+         });
+
+         // Raw byte reading endpoint for AI analysis
+-        server.createContext("/read_bytes", exchange -> {
++        createLocalContext("/read_bytes", exchange -> {
+             Map<String, String> qparams = parseQueryParams(exchange);
+             String address = qparams.get("address");
+             int length = parseIntOrDefault(qparams.get("length"), 16);
+@@ -411,7 +415,7 @@ public class GhidraMCPPlugin extends Plugin {
+         new Thread(() -> {
+             try {
+                 server.start();
+-                Msg.info(this, "GhidraMCP HTTP server started on port " + this.currentPort);
++                Msg.info(this, "GhidraMCP HTTP server started on " + LOOPBACK_ADDRESS + ":" + this.currentPort);
+             } catch (Exception e) {
+                 Msg.error(this, "Failed to start HTTP server on port " + this.currentPort + ". Port might be in use.",
+                         e);
+@@ -459,13 +463,67 @@ public class GhidraMCPPlugin extends Plugin {
+     private boolean isPortAvailable(int port) {
+         if (activeInstances.containsKey(port))
+             return false;
+-        try (ServerSocket s = new ServerSocket(port)) {
++        try (ServerSocket s = new ServerSocket()) {
++            s.bind(new InetSocketAddress(LOOPBACK_ADDRESS, port));
+             return true;
+         } catch (IOException e) {
+             return false;
+         }
+     }
+
++    /**
++     * Register every endpoint behind the same browser-origin boundary. Native MCP
++     * clients do not send browser Origin/Sec-Fetch-Site headers and continue to work.
++     */
++    private void createLocalContext(String path, HttpHandler handler) {
++        server.createContext(path, handler).getFilters().add(new LoopbackBrowserFilter());
++    }
++
++    private static final class LoopbackBrowserFilter extends Filter {
++        @Override
++        public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
++            exchange.getResponseHeaders().set("Cache-Control", "no-store");
++            exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
++
++            String fetchSite = exchange.getRequestHeaders().getFirst("Sec-Fetch-Site");
++            String origin = exchange.getRequestHeaders().getFirst("Origin");
++            if ("cross-site".equalsIgnoreCase(fetchSite) ||
++                    (origin != null && !isLoopbackOrigin(origin))) {
++                byte[] response = "Forbidden: OGhidra accepts browser requests only from loopback origins."
++                        .getBytes(StandardCharsets.UTF_8);
++                exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
++                exchange.sendResponseHeaders(403, response.length);
++                try (OutputStream os = exchange.getResponseBody()) {
++                    os.write(response);
++                }
++                return;
++            }
++            chain.doFilter(exchange);
++        }
++
++        @Override
++        public String description() {
++            return "Reject cross-site browser requests to the loopback-only OGhidra bridge";
++        }
++
++        private static boolean isLoopbackOrigin(String origin) {
++            try {
++                URI uri = URI.create(origin);
++                String scheme = uri.getScheme();
++                String host = uri.getHost();
++                if (scheme == null || host == null || uri.getUserInfo() != null ||
++                        !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
++                    return false;
++                }
++                host = host.toLowerCase(Locale.ROOT);
++                return host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1") ||
++                        host.equals("[::1]");
++            } catch (IllegalArgumentException ignored) {
++                return false;
++            }
++        }
++    }
++
+     // ----------------------------------------------------------------------------------
+     // Pagination-aware listing methods
+     // ----------------------------------------------------------------------------------

@@ -11,13 +11,18 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); pr
 }
 command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/" >&2; exit 1; }
 
-npm install
-uv sync --project apps/api --extra dev
+npm ci
+uv sync --project apps/api --extra dev --locked
 npm run build
 scripts/install-ollama-local.sh
 
 if [[ ! -f .env ]]; then
-  cp .env.example .env
+  install -m 600 .env.example .env
+else
+  chmod 600 .env
 fi
+
+mkdir -p data
+chmod 700 data
 
 echo "Bootstrap complete. Start with scripts/run.sh"

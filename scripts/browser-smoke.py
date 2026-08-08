@@ -78,9 +78,11 @@ def run() -> dict[str, object]:
         checks["mobileScrollWidth"] = page.evaluate("document.documentElement.scrollWidth")
         checks["mobileClientWidth"] = page.evaluate("document.documentElement.clientWidth")
         cdp.send("Emulation.clearDeviceMetricsOverride")
+        cdp.detach()
         page.reload(wait_until="networkidle")
         page.bring_to_front()
-        browser.close()
+        # The browser is a shared persistent noVNC session. Exiting Playwright
+        # disconnects from CDP without sending Browser.close to that process.
 
     failures: list[str] = []
     expected = {

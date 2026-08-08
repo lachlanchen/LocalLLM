@@ -17,6 +17,7 @@ export interface CatalogResponse {
   models: ModelInfo[]
   installed: Array<{ name?: string; model?: string; size?: number }>
   aliases: Record<string, string>
+  ollama?: { ok: boolean; error?: string }
   planned_download_gb: number
 }
 
@@ -47,6 +48,7 @@ export interface ChatMessage {
   content: string
   image?: string
   pending?: boolean
+  model?: string
 }
 
 export interface ResearchSource {
@@ -59,7 +61,7 @@ export interface ResearchTask {
   id: string
   question: string
   model: string
-  status: 'queued' | 'running' | 'complete' | 'failed'
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled'
   stage: string
   progress: number
   queries: string[]
@@ -79,3 +81,35 @@ export interface BinaryMetadata {
   safety: string
 }
 
+export interface DeleteInspectionResponse {
+  deleted: true
+  id: string
+}
+
+export interface McpProjectBinary {
+  name: string
+  file_path: string
+  analysis_complete: boolean
+  code_indexed: boolean
+  strings_indexed: boolean
+}
+
+export interface McpStatus {
+  ok: boolean
+  server?: string
+  version?: string
+  tool_count?: number
+  read_only_tools: string[]
+  mutation_tools_blocked: string[] | boolean
+  binaries?: McpProjectBinary[]
+  binding: string
+  error?: string
+}
+
+export interface McpInvestigationResult {
+  binary?: string
+  question?: string
+  analysis: string
+  evidence: Record<string, unknown>
+  safety: string
+}

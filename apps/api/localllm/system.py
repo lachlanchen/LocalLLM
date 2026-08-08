@@ -8,6 +8,7 @@ from typing import Any
 
 
 async def _command(*args: str, timeout: float = 5.0) -> tuple[int, str]:
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -16,8 +17,26 @@ async def _command(*args: str, timeout: float = 5.0) -> tuple[int, str]:
         )
         output, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
         return process.returncode or 0, output.decode(errors="replace").strip()
-    except (FileNotFoundError, TimeoutError):
+    except FileNotFoundError:
         return 127, "unavailable"
+    except (TimeoutError, asyncio.TimeoutError):
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except (TimeoutError, asyncio.TimeoutError):
+                process.kill()
+                await process.wait()
+        return 124, "timed out"
+    except BaseException:
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except (TimeoutError, asyncio.TimeoutError):
+                process.kill()
+                await process.wait()
+        raise
 
 
 async def gpu_status() -> dict[str, Any]:

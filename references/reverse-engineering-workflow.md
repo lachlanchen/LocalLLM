@@ -26,7 +26,7 @@ The LLM does not replace Ghidra, packet capture, or validation. Its largest cont
 
 ### Ghidra 12.0.3
 
-Installed from the official NSA GitHub release and validated against SHA-256:
+The archive is downloaded from the official NSA GitHub release and validated against SHA-256 before extraction:
 
 ```text
 90d3fffb20b00030dcef8d2a24dd0f422d3a61e432b3ad43f77233ac6d667981
@@ -42,11 +42,19 @@ scripts/start-re-workbench.sh gui
 
 OGhidra integrates Ollama, an agent loop, and a Ghidra extension. The extension is built against the pinned Ghidra release and installed under that local Ghidra tree.
 
-The upstream August 2026 source includes two legacy `GHIDRA_MODULE_*=...` lines that Ghidra 12.0.3 reports as invalid. `scripts/setup-re-toolchain.sh` removes those metadata lines from the build input; identity and version remain in `extension.properties`.
+The installer checks out exact upstream commit
+`93a4380fc748a393690be9bfd2c2156fade82757`. It then applies the repository-tracked
+[`patches/oghidra-local-security.patch`](../patches/oghidra-local-security.patch)
+before building. The patch removes two legacy `GHIDRA_MODULE_*=...` lines that
+Ghidra 12.0.3 rejects; identity and version remain in `extension.properties`.
+It also changes the embedded Java bridge from an all-interface listener to
+`127.0.0.1` and puts every HTTP context behind one browser request filter.
 
 ### PyGhidra-MCP
 
-Installed in `.venv-tools` with Python 3.12. A verified headless session exposes 20 tools, including:
+Installed from exact upstream commit
+`f29063b8636100b71e9c3aec61fe056827c556e4` in `.venv-tools` with Python
+3.12. A verified headless session exposes 20 tools, including:
 
 ```text
 decompile_function
@@ -73,6 +81,47 @@ LOCALLLM_RE_PROJECT_NAME=device \
 ```
 
 MCP URL: `http://127.0.0.1:18765/mcp`.
+
+The installer finishes by running an isolated MCP verification against
+`/bin/true`. It creates a temporary project, starts the server on an
+OS-selected loopback port, initializes it with the official MCP Python client,
+asserts the exact 20-tool surface, verifies the imported binary, and performs a
+read-only function-symbol search. The server is terminated and its exact
+temporary directory is removed after either success or failure. Rerun it, or
+provide another explicitly benign binary, with:
+
+```bash
+scripts/verify-re-toolchain.sh
+scripts/verify-re-toolchain.sh /path/to/benign-binary
+```
+
+For named working projects, `LOCALLLM_RE_PROJECT_NAME` is restricted to 1–64
+ASCII letters, digits, dots, underscores, or hyphens, beginning with a letter
+or digit. Path separators and traversal components are rejected before a
+server or project is created.
+
+## Local bridge trust boundary
+
+Both reverse-engineering bridges are deliberately **local-only, not
+authenticated services**:
+
+- OGhidra binds specifically to `127.0.0.1`, not `0.0.0.0` or every network
+  interface. Its centralized filter rejects `Sec-Fetch-Site: cross-site` and
+  rejects every browser `Origin` except literal loopback origins
+  (`localhost`, `127.0.0.1`, or `::1`). Native local clients that omit browser
+  origin headers remain compatible.
+- `scripts/start-re-workbench.sh mcp` explicitly binds PyGhidra-MCP to
+  `127.0.0.1`.
+- Neither bridge issues or verifies an API key. Any process or user session that
+  can reach the workstation's loopback interface can call read and mutation
+  tools, including rename, comment, type, prototype, and save operations.
+
+The browser filter reduces cross-site request and DNS-rebinding risk; it is not
+authentication or local process isolation. Use the bridges only on a trusted
+single-user workstation, close them when analysis is finished, and do not
+publish, port-forward, reverse-proxy, container-share, or tunnel their ports.
+Remote or multi-user operation requires an authenticated authorization layer
+that this project does not provide.
 
 ## Recommended investigation sequence
 
@@ -101,7 +150,13 @@ Use structured evidence:
 
 For USB devices, pair static work with Windows USBPcap/Wireshark or a hardware analyzer. Record control, bulk, interrupt, and isochronous transfers; include setup packets, payload lengths, timing, status, and device state.
 
-On Linux, Wireshark/tshark capture requires system packages and usbmon permissions. LocalLLM does not silently add capture privileges. The operator must install and configure these with appropriate system authority.
+Saved USBPcap, usbmon, and PCAPNG evidence can be inspected without host
+packet-package installation using the project's network-disabled container,
+built from the digest-pinned Ubuntu base documented in
+[USB packet evidence](usb-evidence-tooling.md). Live Linux capture
+still requires system packages and usbmon permissions. LocalLLM does not
+silently add capture privileges; the operator must explicitly install and
+configure them with appropriate system authority.
 
 ### 5. Write a protocol specification
 
@@ -131,7 +186,7 @@ Binary strings can contain text crafted to manipulate an LLM agent. Webpages, sy
 LocalLLM’s Binary Studio instructs the model to ignore embedded instructions and never executes uploads. MCP clients should also:
 
 - scope analysis to an explicit project;
-- keep listeners on loopback;
+- keep listeners on loopback and never treat loopback as authentication;
 - review mutations such as rename, type change, comment, delete, or save;
 - deny shell/network tools unless separately needed;
 - log the evidence behind every conclusion.
@@ -150,6 +205,6 @@ Still difficult: modern GPU stacks, Wi-Fi, power management, high-performance st
 
 - [Ghidra official repository](https://github.com/NationalSecurityAgency/ghidra)
 - [Ghidra 12.0.3 official release](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.0.3_build)
-- [LLNL OGhidra](https://github.com/LLNL/OGhidra)
-- [PyGhidra-MCP](https://github.com/clearbluejar/pyghidra-mcp)
+- [LLNL OGhidra at the installed commit](https://github.com/LLNL/OGhidra/tree/93a4380fc748a393690be9bfd2c2156fade82757)
+- [PyGhidra-MCP at the installed commit](https://github.com/clearbluejar/pyghidra-mcp/tree/f29063b8636100b71e9c3aec61fe056827c556e4)
 - [LaurieWired GhidraMCP](https://github.com/LaurieWired/GhidraMCP)

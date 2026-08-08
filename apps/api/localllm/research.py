@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 
 import httpx
 import trafilatura
@@ -43,20 +43,91 @@ class ResearchTask:
     updated_at: float = field(default_factory=time.time)
 
 
+class ResearchCapacityError(RuntimeError):
+    """Raised when the bounded local research queue is already full."""
+
+
 class ResearchManager:
+    evidence_limit = 90_000
+    max_pending_tasks = 3
+    task_id_pattern = re.compile(r"^[0-9a-f]{12}$")
+    source_heading_pattern = (
+        r"(?im)^#{1,6}\s+(?:\*{1,2}|_{1,2})?"
+        r"(?:sources|references)(?:\*{1,2}|_{1,2})?\s*$"
+    )
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.tasks: dict[str, ResearchTask] = {}
+        self._runners: dict[str, asyncio.Task[None]] = {}
+        # A single local model synthesis at a time avoids competing for the same GPU.
+        self._run_slot = asyncio.Semaphore(1)
         self.directory = settings.data_dir / "research"
-        self.directory.mkdir(parents=True, exist_ok=True)
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.directory.chmod(0o700)
 
     def create(self, question: str, model: str) -> ResearchTask:
+        if len(self._runners) >= self.max_pending_tasks:
+            raise ResearchCapacityError(
+                "The local research queue is full; finish or cancel a run before starting another"
+            )
         task = ResearchTask(id=uuid.uuid4().hex[:12], question=question, model=resolve_model(model))
         self.tasks[task.id] = task
-        asyncio.create_task(self._run(task))
+        runner = asyncio.create_task(self._run_managed(task), name=f"research-{task.id}")
+        self._runners[task.id] = runner
+        runner.add_done_callback(
+            lambda completed, task_id=task.id: self._runner_finished(task_id, completed)
+        )
         return task
 
+    def _runner_finished(self, task_id: str, completed: asyncio.Task[None]) -> None:
+        if self._runners.get(task_id) is completed:
+            self._runners.pop(task_id, None)
+
+    async def _run_managed(self, task: ResearchTask) -> None:
+        try:
+            async with self._run_slot:
+                await self._run(task)
+        except asyncio.CancelledError:
+            task.status = "cancelled"
+            task.stage = "Research cancelled"
+            task.error = None
+            self._persist(task)
+            raise
+
+    async def cancel(self, task_id: str) -> ResearchTask | None:
+        task = self.get(task_id)
+        if task is None:
+            return None
+        runner = self._runners.get(task_id)
+        if runner is not None and not runner.done():
+            task.status = "cancelled"
+            task.stage = "Research cancelled"
+            task.error = None
+            self._persist(task)
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+        return task
+
+    async def shutdown(self) -> None:
+        runner_items = list(self._runners.items())
+        runners = [runner for _task_id, runner in runner_items]
+        for task_id, runner in runner_items:
+            if not runner.done():
+                task = self.tasks.get(task_id)
+                if task is not None:
+                    task.status = "cancelled"
+                    task.stage = "Research cancelled"
+                    task.error = None
+                    self._persist(task)
+                runner.cancel()
+        if runners:
+            await asyncio.gather(*runners, return_exceptions=True)
+        self._runners.clear()
+
     def get(self, task_id: str) -> ResearchTask | None:
+        if not self.task_id_pattern.fullmatch(task_id):
+            return None
         task = self.tasks.get(task_id)
         if task:
             return task
@@ -66,23 +137,34 @@ class ResearchManager:
         try:
             data = json.loads(path.read_text())
             data["sources"] = [ResearchSource(**source) for source in data.get("sources", [])]
+            if data.get("status") in {"queued", "running"}:
+                data.update(
+                    status="failed",
+                    stage="Research interrupted",
+                    error="The local service restarted before this research run completed; start a new run.",
+                )
             task = ResearchTask(**data)
             self.tasks[task.id] = task
+            if task.stage == "Research interrupted":
+                self._persist(task)
             return task
         except (OSError, TypeError, ValueError):
             return None
 
     def serialize(self, task: ResearchTask) -> dict[str, Any]:
-        return asdict(task)
+        payload = asdict(task)
+        for source in payload["sources"]:
+            source.pop("content", None)
+        return payload
 
     def _persist(self, task: ResearchTask) -> None:
         task.updated_at = time.time()
-        (self.directory / f"{task.id}.json").write_text(
-            json.dumps(self.serialize(task), indent=2, ensure_ascii=False)
-        )
+        path = self.directory / f"{task.id}.json"
+        path.write_text(json.dumps(self.serialize(task), indent=2, ensure_ascii=False))
+        path.chmod(0o600)
 
     async def _model_chat(self, task: ResearchTask, messages: list[dict[str, str]]) -> str:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=600.0, trust_env=False) as client:
             response = await client.post(
                 f"{self.settings.ollama_base_url.rstrip('/')}/api/chat",
                 json={
@@ -143,12 +225,12 @@ class ResearchManager:
         return sources
 
     @staticmethod
-    async def _is_public_http_url(url: str) -> bool:
+    async def _resolve_public_addresses(url: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
         parsed = urlparse(url)
         try:
             port = parsed.port
         except ValueError:
-            return False
+            return []
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
@@ -156,7 +238,7 @@ class ResearchManager:
             or parsed.password
             or port not in {None, 80, 443}
         ):
-            return False
+            return []
         try:
             addresses = [ipaddress.ip_address(parsed.hostname)]
         except ValueError:
@@ -168,9 +250,48 @@ class ResearchManager:
                     type=socket.SOCK_STREAM,
                 )
             except socket.gaierror:
-                return False
+                return []
             addresses = list({ipaddress.ip_address(record[4][0]) for record in records})
-        return bool(addresses) and all(address.is_global for address in addresses)
+        if not addresses or not all(address.is_global for address in addresses):
+            return []
+        return sorted(addresses, key=lambda address: (address.version, int(address)))
+
+    @staticmethod
+    async def _is_public_http_url(url: str) -> bool:
+        return bool(await ResearchManager._resolve_public_addresses(url))
+
+    @staticmethod
+    async def _get_pinned_response(
+        client: httpx.AsyncClient, url: str
+    ) -> httpx.Response | None:
+        """Connect to a validated address while preserving HTTP Host and TLS SNI."""
+
+        parsed = urlparse(url)
+        addresses = await ResearchManager._resolve_public_addresses(url)
+        if not addresses or not parsed.hostname:
+            return None
+
+        authority = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        if parsed.port is not None:
+            authority = f"{authority}:{parsed.port}"
+
+        for address in addresses:
+            pinned_host = f"[{address}]" if address.version == 6 else str(address)
+            if parsed.port is not None:
+                pinned_host = f"{pinned_host}:{parsed.port}"
+            pinned_url = urlunparse(parsed._replace(netloc=pinned_host))
+            extensions = {"sni_hostname": parsed.hostname} if parsed.scheme == "https" else None
+            try:
+                request = client.build_request(
+                    "GET",
+                    pinned_url,
+                    headers={"Host": authority, "Connection": "close"},
+                    extensions=extensions,
+                )
+                return await client.send(request, stream=True, follow_redirects=False)
+            except httpx.HTTPError:
+                continue
+        return None
 
     @staticmethod
     def _clean_extracted_text(text: str) -> str:
@@ -183,15 +304,127 @@ class ResearchManager:
         text = re.sub(r"\b[A-Za-z0-9+/]{500,}={0,2}\b", "[encoded payload omitted]", text)
         return re.sub(r"\n{4,}", "\n\n\n", text).strip()
 
+    @classmethod
+    def _number_evidence(
+        cls, sources: list[ResearchSource]
+    ) -> tuple[list[ResearchSource], str]:
+        """Pack complete source blocks and return the exact list represented in them."""
+
+        selected: list[ResearchSource] = []
+        blocks: list[str] = []
+        length = 0
+        for source in sources:
+            index = len(selected) + 1
+            extracted = (source.content or "").strip() or "[No page text extracted]"
+            block = (
+                f"SOURCE [{index}]\nTitle: {source.title}\nURL: {source.url}\n"
+                f"Domain: {urlparse(source.url).netloc}\nSearch snippet: {source.snippet}\n"
+                f"Extracted evidence:\n{extracted}"
+            )
+            added_length = len(block) + (2 if blocks else 0)
+            if length + added_length > cls.evidence_limit:
+                break
+            selected.append(source)
+            blocks.append(block)
+            length += added_length
+        return selected, "\n\n".join(blocks)
+
+    @classmethod
+    def _citations_are_valid(cls, report: str, source_count: int) -> bool:
+        body = re.split(cls.source_heading_pattern, report, maxsplit=1)[0].rstrip()
+        if not body or source_count < 1:
+            return False
+
+        units: list[str] = []
+        paragraph: list[str] = []
+        list_item: list[str] = []
+        in_code_fence = False
+
+        def flush_paragraph() -> None:
+            if paragraph:
+                units.append(" ".join(paragraph))
+                paragraph.clear()
+
+        def flush_list_item() -> None:
+            if list_item:
+                units.append(" ".join(list_item))
+                list_item.clear()
+
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                flush_paragraph()
+                flush_list_item()
+                in_code_fence = not in_code_fence
+                continue
+            if in_code_fence:
+                continue
+            if not stripped:
+                flush_paragraph()
+                flush_list_item()
+                continue
+            if re.match(r"^#{1,6}\s", stripped) or re.match(r"^[-*_]{3,}$", stripped):
+                flush_paragraph()
+                flush_list_item()
+                continue
+            if stripped.startswith("|"):
+                flush_paragraph()
+                flush_list_item()
+                continue
+            if re.match(r"^(?:[-+*]|\d+[.)])\s+", stripped):
+                flush_paragraph()
+                flush_list_item()
+                # A numbered bold label such as ``1. **Access control**`` is structure,
+                # not a factual list item. Any prose after the label remains a unit.
+                if re.fullmatch(
+                    r"\d+[.)]\s+(?:\*{2}[^*]+\*{2}|__[^_]+__)", stripped
+                ):
+                    continue
+                list_item.append(stripped)
+                continue
+            if list_item:
+                list_item.append(stripped)
+                continue
+            paragraph.append(stripped)
+        flush_paragraph()
+        flush_list_item()
+
+        if not units:
+            return False
+        for unit in units:
+            cited = {int(item) for item in re.findall(r"\[(\d+)]", unit)}
+            if not cited or not all(1 <= item <= source_count for item in cited):
+                return False
+        return True
+
+    @classmethod
+    def _with_canonical_sources(
+        cls, report: str, sources: list[ResearchSource]
+    ) -> str:
+        """Replace a model-written source appendix with exact numbered Markdown links."""
+        body = re.split(cls.source_heading_pattern, report, maxsplit=1)[0].rstrip()
+        links = []
+        for index, source in enumerate(sources, 1):
+            title = re.sub(r"[\x00-\x1f\x7f]+", " ", source.title)
+            title = re.sub(r"\s+", " ", title).strip() or urlparse(source.url).netloc
+            title = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+            destination = quote(
+                source.url,
+                safe=":/?#[]@!$&'*+,;=%",
+            )
+            links.append(f"[{index}] [{title}]({destination})")
+        return f"{body}\n\n## Sources\n\n" + "\n".join(links)
+
     @staticmethod
     async def _fetch_source(client: httpx.AsyncClient, source: ResearchSource) -> None:
         try:
             current_url = source.url
             response_text = ""
             for _redirect in range(5):
-                if not await ResearchManager._is_public_http_url(current_url):
+                response = await ResearchManager._get_pinned_response(client, current_url)
+                if response is None:
                     return
-                async with client.stream("GET", current_url, follow_redirects=False) as response:
+                try:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location:
@@ -219,8 +452,10 @@ class ResearchManager:
                             return
                     encoding = response.encoding or "utf-8"
                     response_text = bytes(body).decode(encoding, errors="replace")
-                    source.url = str(response.url)
+                    source.url = current_url
                     break
+                finally:
+                    await response.aclose()
             if not response_text:
                 return
             text = await asyncio.to_thread(
@@ -248,20 +483,32 @@ class ResearchManager:
             task.stage = "Reading and extracting sources"
             task.progress = 48
             self._persist(task)
-            limits = httpx.Limits(max_connections=6)
+            limits = httpx.Limits(max_connections=6, max_keepalive_connections=0)
             headers = {"User-Agent": "LocalLLM-Research/0.1 (+local research assistant)"}
-            async with httpx.AsyncClient(timeout=20.0, headers=headers, limits=limits) as client:
+            async with httpx.AsyncClient(
+                timeout=20.0,
+                headers=headers,
+                limits=limits,
+                trust_env=False,
+            ) as client:
                 await asyncio.gather(
                     *(self._fetch_source(client, source) for source in task.sources)
                 )
 
-            usable = [source for source in task.sources if source.content or source.snippet]
-            evidence = "\n\n".join(
-                f"SOURCE [{index}]\nTitle: {source.title}\nURL: {source.url}\n"
-                f"Domain: {urlparse(source.url).netloc}\nSearch snippet: {source.snippet}\n"
-                f"Extracted evidence:\n{source.content or '[No page text extracted]'}"
-                for index, source in enumerate(usable, start=1)
+            public_targets = await asyncio.gather(
+                *(self._is_public_http_url(source.url) for source in task.sources)
             )
+            usable = [
+                source
+                for source, is_public in zip(task.sources, public_targets, strict=True)
+                if is_public
+                and ((source.content or "").strip() or (source.snippet or "").strip())
+            ]
+            task.sources, evidence = self._number_evidence(usable)
+            self._persist(task)
+            if not task.sources:
+                raise RuntimeError("No usable public web evidence was found")
+
             task.stage = "Synthesizing a cited report"
             task.progress = 76
             self._persist(task)
@@ -281,13 +528,11 @@ class ResearchManager:
                 },
                 {
                     "role": "user",
-                    "content": f"QUESTION\n{task.question}\n\nEVIDENCE\n{evidence[:90000]}",
+                    "content": f"QUESTION\n{task.question}\n\nEVIDENCE\n{evidence}",
                 },
             ]
             task.report = await self._model_chat(task, messages)
-            cited = {int(item) for item in re.findall(r"\[(\d+)]", task.report)}
-            valid_citations = cited and all(1 <= item <= len(usable) for item in cited)
-            if not valid_citations:
+            if not self._citations_are_valid(task.report, len(task.sources)):
                 repair_messages = [
                     {
                         "role": "system",
@@ -302,11 +547,16 @@ class ResearchManager:
                         "role": "user",
                         "content": (
                             f"QUESTION\n{task.question}\n\nDRAFT\n{task.report[:30000]}\n\n"
-                            f"NUMBERED EVIDENCE\n{evidence[:90000]}"
+                            f"NUMBERED EVIDENCE\n{evidence}"
                         ),
                     },
                 ]
                 task.report = await self._model_chat(task, repair_messages)
+                if not self._citations_are_valid(task.report, len(task.sources)):
+                    raise RuntimeError(
+                        "The local model could not produce a report with valid source citations"
+                    )
+            task.report = self._with_canonical_sources(task.report, task.sources)
             task.status = "complete"
             task.stage = "Research complete"
             task.progress = 100
