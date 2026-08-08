@@ -48,6 +48,12 @@ localllm-embed       → bge-m3:latest
 - Hosted OpenAI tools such as web search, file search, computer use, image generation, and code interpreter do not appear merely because the endpoint is named `/v1/responses`.
 - The app’s Deep Research pipeline is a separate local orchestration route, not an OpenAI hosted tool.
 - Context size is configured at model/runtime level; it is not inferred from an OpenAI request.
+- Thinking-capable Qwen3 tags can spend much of a small completion-token budget
+  on hidden reasoning before emitting visible text. A very low `max_tokens` can
+  therefore produce an empty visible message even though inference occurred;
+  omit the limit or leave enough headroom. Ollama's native `/api/chat` supports
+  `"think": false` for controlled no-thinking benchmarks, but that field is not
+  part of the OpenAI contract.
 
 ## Verify with the official Python SDK
 
