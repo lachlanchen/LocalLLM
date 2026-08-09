@@ -298,7 +298,7 @@ async def _bounded_json_object(request: Request, max_bytes: int) -> dict[str, An
     if not isinstance(decoded, dict):
         raise HTTPException(status_code=422, detail="Request body must be a JSON object")
     if not _json_structure_is_bounded(decoded):
-        raise HTTPException(status_code=400, detail="Request JSON is nested too deeply")
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
     return decoded
 
 
