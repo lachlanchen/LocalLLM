@@ -17,6 +17,10 @@ describe('application accessibility landmarks', () => {
     expect(html).toContain('aria-describedby="composer-privacy-note"')
     expect(html).toContain('maxLength="32000"')
     expect(html).toContain('aria-label="Chat composer"')
+    expect(html).toContain('data-testid="agent-routing-toggle"')
+    expect(html).toContain('role="switch"')
+    expect(html).toContain('aria-checked="true"')
+    expect(html).toContain('aria-label="Open Agent details"')
   })
 
   it('exposes the initially open desktop history rail as a named session list', () => {

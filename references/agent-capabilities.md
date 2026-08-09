@@ -1,8 +1,11 @@
 # Local agent capabilities and Python sandbox
 
-LocalLLM's agent boundary is deliberately separate from ordinary chat. A normal
-chat request cannot run Python, and plan validation never dispatches a tool. The
-integrated service supplies two reusable pieces:
+LocalLLM's agent boundary is deliberately separate from ordinary chat.
+Ordinary prompts cannot run Python, and plan validation never dispatches a
+tool. A default-on browser preference can route an explicit Python execution
+request submitted through normal **Send** into the visible Agent plan, but that
+routing step does not execute anything. The integrated service supplies two
+reusable pieces:
 
 1. a model-independent JSON plan validator and staging coordinator; and
 2. an explicitly enabled, two-step Python execution API backed by a fixed local
@@ -88,6 +91,9 @@ To opt in, set the environment variable and restart the API:
 LOCALLLM_AGENT_CODE_EXECUTION_ENABLED=true
 ```
 
+This operator setting is independent of the browser's Agent routing
+preference. Turning routing on cannot enable the Python sandbox.
+
 ## Mounted routes and request bounds
 
 `localllm.agent_runtime` is mounted by the main application under `/api/agent`.
@@ -147,7 +153,7 @@ limits are distinct statuses.
 ### Propose without executing
 
 `POST /api/agent/plans/propose` is the plan-only entry point used by the
-collapsed, default-off-in-use frontend Agent panel:
+collapsed frontend Agent panel and its default-on execution-intent routing:
 
 ```json
 {
@@ -243,15 +249,24 @@ The proposal endpoint only stages a plan. Even a valid `python` step is marked
 `awaiting_explicit_confirmation`; it cannot bypass the separate code-bound
 confirmation and execution exchange.
 
-In the bundled UI, **Plan** shows this staged graph without running it. Answer,
-web-search, paper-search, and vision objectives remain previews for the user to
-handle through the normal Auto chat composer, which retains its ordinary search
-and image boundaries. Only a displayed Python step can enter the separate
-review/confirm/**Run** flow. Closing the panel or using normal chat never opts
-into execution. When an execution result is deliberately appended to the
-resumable transcript, its rendered Markdown is capped at 30,000 characters so
-it remains below the conversation store's 32,000-character message limit; the
-result records whether either the API capture or UI formatting was truncated.
+The frontend's Agent routing toggle defaults on and remembers its boolean state
+in browser-local storage. It stores no prompt or goal, transcript, code, code
+hash, confirmation token, or execution result. With routing on, a narrow,
+explicit request to run Python or execute code through normal **Send** opens the
+panel and proposes the goal; ordinary prompts continue through ordinary chat.
+Turning routing off disables only this automatic handoff, so the panel's manual
+**Plan** action remains available.
+
+In the bundled UI, either route shows the staged graph without running it.
+Answer, web-search, paper-search, and vision objectives remain previews for the
+user to handle through the normal Auto chat composer, which retains its
+ordinary search and image boundaries. Only a displayed Python step can enter
+the separate **Review isolated Python** and **Run isolated Python** flow.
+Closing the panel or using ordinary chat never opts into execution. When an
+execution result is deliberately appended to the resumable transcript, its
+rendered Markdown is capped at 30,000 characters so it remains below the
+conversation store's 32,000-character message limit; the result records
+whether either the API capture or UI formatting was truncated.
 
 ### Validate supplied plan JSON
 

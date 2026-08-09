@@ -47,7 +47,18 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { AgentPanel } from './AgentPanel'
+import {
+  AgentPanel,
+  type AgentAutoPlanRequest,
+  type AgentAutoRequestOutcome,
+  type AgentResultContext,
+} from './AgentPanel'
+import {
+  MAX_AGENT_GOAL_CHARS,
+  readAgentAutoEnabled,
+  shouldAutoRouteAgent,
+  writeAgentAutoEnabled,
+} from './agentRouting'
 import { ApiError, api, fileToDataUrl, formatBytes, imageFileError, pullModel, streamAgentChat } from './api'
 import { BinaryDropZone } from './BinaryDropZone'
 import {
@@ -464,6 +475,16 @@ function ProviderStatusStrip({ status }: { status: SearchStatus | null }) {
   )
 }
 
+interface ActiveAgentTask {
+  id: number
+  goal: string
+  model: string
+  mode: ChatMode
+  conversationId: string
+  revision: number
+  userMessageId: string
+}
+
 function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null; initialPrompt?: string }) {
   const [model, setModel] = useState('localllm-fast')
   const [visionModel, setVisionModel] = useState('localllm-vision')
@@ -474,6 +495,9 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const [searchStatus, setSearchStatus] = useState<SearchStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [agentBusy, setAgentBusy] = useState(false)
+  const [agentDispatching, setAgentDispatching] = useState(false)
+  const [agentRoutingEnabled, setAgentRoutingEnabled] = useState(readAgentAutoEnabled)
+  const [agentPlanRequest, setAgentPlanRequest] = useState<AgentAutoPlanRequest | null>(null)
   const [imageGenerationBusy, setImageGenerationBusy] = useState(false)
   const [error, setError] = useState('')
   const [conversations, setConversations] = useState<ConversationListItem[]>([])
@@ -508,11 +532,14 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const sessionAbortRef = useRef<AbortController | null>(null)
   const sessionBusyRef = useRef(false)
   const compactionRef = useRef(false)
+  const agentRequestSequenceRef = useRef(0)
+  const agentDispatchGateRef = useRef(false)
+  const activeAgentTaskRef = useRef<ActiveAgentTask | null>(null)
   const textModel = chooseAvailableAlias(catalog, model, 'text')
   const availableVisionModel = chooseAvailableAlias(catalog, visionModel, 'vision')
   const hasImageContext = Boolean(image || hasInferenceImage(messages, summarizedMessageCount))
   const activeModel = hasImageContext ? availableVisionModel : textModel
-  const capabilityBusy = agentBusy || imageGenerationBusy
+  const capabilityBusy = agentBusy || imageGenerationBusy || agentDispatching || Boolean(agentPlanRequest)
   const threadMode = messages.length ? messages[messages.length - 1].mode ?? mode : mode
   const threadLabel = threadMode === 'local'
     ? 'LOCAL SESSION'
@@ -523,6 +550,28 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const markSessionBusy = useCallback((value: boolean) => {
     sessionBusyRef.current = value
     setSessionBusy(value)
+  }, [])
+
+  const changeAgentRouting = useCallback((enabled: boolean) => {
+    setAgentRoutingEnabled(enabled)
+    if (!writeAgentAutoEnabled(enabled)) {
+      setError(`Agent routing is ${enabled ? 'on' : 'off'} for this tab, but the browser blocked remembering the preference.`)
+    }
+  }, [])
+
+  const finishAgentTask = useCallback((requestId: number, outcome: AgentAutoRequestOutcome) => {
+    if (activeAgentTaskRef.current?.id !== requestId) return
+    activeAgentTaskRef.current = null
+    agentDispatchGateRef.current = false
+    setAgentPlanRequest((current) => current?.id === requestId ? null : current)
+    setAgentDispatching(false)
+    if (outcome === 'cancelled') {
+      setError((current) => current || 'Agent planning was discarded. The saved request remains in this conversation.')
+    } else if (outcome === 'unavailable') {
+      setError('Nothing ran because Agent could not stage exactly one safe, self-contained Python step. Refine the request, or turn Agent routing off for a normal answer.')
+    } else if (outcome === 'failed') {
+      setError('The Agent request did not complete, and nothing ran. The request is saved; retry it when the local planner and sandbox are ready.')
+    }
   }, [])
 
   const closeHistory = useCallback((restoreFocus = true) => {
@@ -668,6 +717,8 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     invalidateRequest(requestLifecycleRef.current)
     sessionGenerationRef.current += 1
     fileReadGenerationRef.current += 1
+    agentDispatchGateRef.current = false
+    activeAgentTaskRef.current = null
     abortRef.current?.abort()
     sessionAbortRef.current?.abort()
   }, [])
@@ -764,6 +815,10 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     conversationIdRef.current = null
     conversationRevisionRef.current = null
     persistedTranscriptRef.current = []
+    agentDispatchGateRef.current = false
+    activeAgentTaskRef.current = null
+    setAgentPlanRequest(null)
+    setAgentDispatching(false)
     setConversationId(null)
     setConversationTitle('New conversation')
     setTitleDraft('New conversation')
@@ -913,11 +968,88 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     const draft = input
     const attachment = image
     const text = draft.trim()
-    if ((!text && !image) || !activeModel || capabilityBusy || sessionBusyRef.current || compactionRef.current) return
+    if (
+      (!text && !image)
+      || !activeModel
+      || capabilityBusy
+      || agentDispatchGateRef.current
+      || sessionBusyRef.current
+      || compactionRef.current
+    ) return
     const validation = chatInputError(draft)
     if (validation) {
       setError(validation)
       window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+      return
+    }
+    const explicitAgentIntent = shouldAutoRouteAgent(text)
+    if (agentRoutingEnabled && !attachment && explicitAgentIntent) {
+      if (text.length > MAX_AGENT_GOAL_CHARS) {
+        setError(`Agent execution requests are limited to ${MAX_AGENT_GOAL_CHARS.toLocaleString()} characters. Shorten this task before sending it.`)
+        window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+        return
+      }
+      const requestId = ++agentRequestSequenceRef.current
+      const user: ChatMessage = { id: uid(), role: 'user', content: text, mode }
+      const next = [...messages, user]
+      agentDispatchGateRef.current = true
+      setAgentDispatching(true)
+      forceTranscriptScrollRef.current = true
+      followTranscriptRef.current = true
+      setMessages(next)
+      setInput('')
+      setError('')
+      try {
+        const initialSave = await persistDraftBeforeInference(
+          {
+            messages: persistedTranscriptRef.current,
+            draft,
+            attachment,
+          },
+          () => persistMessages(next, activeModel, mode),
+        )
+        if (!initialSave.ok) {
+          forceTranscriptScrollRef.current = true
+          followTranscriptRef.current = true
+          setMessages(initialSave.rollback.messages)
+          setInput(initialSave.rollback.draft)
+          setImage(initialSave.rollback.attachment)
+          setSessionStatus(conversationIdRef.current ? 'saved' : 'new')
+          const failure = initialSave.reason instanceof Error
+            ? initialSave.reason.message
+            : 'This Agent request could not be saved.'
+          setError(`${failure} Nothing was planned or run; your exact draft was restored.`)
+          window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+          return
+        }
+        const saved = initialSave.saved
+        const task: ActiveAgentTask = {
+          id: requestId,
+          goal: text,
+          model: activeModel,
+          mode,
+          conversationId: saved.id,
+          revision: saved.revision,
+          userMessageId: user.id,
+        }
+        activeAgentTaskRef.current = task
+        setAgentPlanRequest({
+          id: requestId,
+          goal: text,
+          model: activeModel,
+          contextKey: saved.id,
+        })
+      } catch (reason) {
+        setMessages(persistedTranscriptRef.current)
+        setInput(draft)
+        setImage(attachment)
+        setError(reason instanceof Error ? reason.message : 'This Agent request could not be saved.')
+      } finally {
+        setAgentDispatching(false)
+        if (!activeAgentTaskRef.current || activeAgentTaskRef.current.id !== requestId) {
+          agentDispatchGateRef.current = false
+        }
+      }
       return
     }
     const generation = beginRequest(requestLifecycleRef.current)
@@ -1070,7 +1202,17 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
         if (abortRef.current === controller) abortRef.current = null
       }
     }
-  }, [activeModel, capabilityBusy, compactCurrent, image, input, messages, mode, persistMessages])
+  }, [
+    activeModel,
+    agentRoutingEnabled,
+    capabilityBusy,
+    compactCurrent,
+    image,
+    input,
+    messages,
+    mode,
+    persistMessages,
+  ])
 
   const attach = async (file?: File) => {
     if (capabilityBusy || sessionBusyRef.current || compactionRef.current) return
@@ -1087,41 +1229,61 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     }
   }
 
-  const appendAgentResult = useCallback((markdown: string) => {
-    const task = input.trim()
-    if (!task || busy || sessionBusyRef.current || compactionRef.current || imageGenerationBusy) {
-      setError('Finish the current chat or image operation before adding an Agent result.')
-      return
+  const appendAgentResult = useCallback(async (markdown: string, context: AgentResultContext) => {
+    const taskGoal = context.goal.trim()
+    if (!taskGoal || busy || sessionBusyRef.current || compactionRef.current || imageGenerationBusy) {
+      throw new Error('Finish the current chat or image operation before adding an Agent result.')
     }
-    const user: ChatMessage = { id: uid(), role: 'user', content: task, image, mode }
     const assistant: ChatMessage = {
       id: uid(),
       role: 'assistant',
       content: markdown,
       model: 'agent-python-sandbox',
-      mode,
+      mode: context.requestId === undefined ? mode : activeAgentTaskRef.current?.mode ?? mode,
     }
-    const next = [...messages, user, assistant]
+    let next: ChatMessage[]
+    let selectedModel = activeModel || model
+    let selectedMode = mode
+    if (context.requestId !== undefined) {
+      const task = activeAgentTaskRef.current
+      if (
+        !task
+        || task.id !== context.requestId
+        || task.goal !== taskGoal
+        || conversationIdRef.current !== task.conversationId
+        || conversationRevisionRef.current !== task.revision
+        || !messages.some((message) => message.id === task.userMessageId && message.role === 'user')
+      ) {
+        throw new Error('This result no longer matches the saved Agent request. Nothing was appended.')
+      }
+      selectedModel = task.model
+      selectedMode = task.mode
+      assistant.mode = task.mode
+      next = [...messages, assistant]
+    } else {
+      const user: ChatMessage = {
+        id: uid(),
+        role: 'user',
+        content: taskGoal,
+        image,
+        mode,
+      }
+      next = [...messages, user, assistant]
+    }
     forceTranscriptScrollRef.current = true
     followTranscriptRef.current = true
-    setMessages(next)
-    setInput('Explain the isolated result and continue this task.')
-    setImage(undefined)
     setError('')
-    // Let AgentPanel finish its own request lane before the session write makes
-    // the panel externally disabled. This preserves deterministic cleanup.
-    void (async () => {
-      await Promise.resolve()
-      markSessionBusy(true)
-      try {
-        await persistMessages(next, activeModel || model, mode)
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : 'The Agent result could not be saved.')
-      } finally {
-        markSessionBusy(false)
-      }
-    })()
-  }, [activeModel, busy, image, imageGenerationBusy, input, markSessionBusy, messages, mode, model, persistMessages])
+    try {
+      await persistMessages(next, selectedModel, selectedMode)
+      setMessages(next)
+      setInput('Explain the isolated result and continue this task.')
+      setImage(undefined)
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : 'The Agent result could not be saved.'
+      setError(message)
+      throw new Error(message)
+    }
+  }, [activeModel, busy, image, imageGenerationBusy, messages, mode, model, persistMessages])
 
   const useGeneratedImage = useCallback(async (blob: Blob, prompt: string) => {
     if (busy || sessionBusyRef.current || compactionRef.current || agentBusy) {
@@ -1250,7 +1412,12 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
             goal={input}
             model={activeModel || model}
             hasImage={Boolean(image)}
-            disabled={busy || sessionBusy || imageGenerationBusy || sessionStatus === 'compacting'}
+            contextKey={conversationId ?? 'new'}
+            routingEnabled={agentRoutingEnabled}
+            autoRequest={agentPlanRequest}
+            disabled={busy || sessionBusy || imageGenerationBusy || agentDispatching || sessionStatus === 'compacting'}
+            onRoutingEnabledChange={changeAgentRouting}
+            onAutoRequestEnd={finishAgentTask}
             onBusyChange={setAgentBusy}
             onAppendResult={appendAgentResult}
           />

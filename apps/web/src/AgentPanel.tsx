@@ -10,6 +10,7 @@ import {
   type AgentPlanProposal,
   type PythonPlanStep,
 } from './agentApi'
+import { MAX_AGENT_GOAL_CHARS } from './agentRouting'
 import './agent-panel.css'
 
 export interface AgentPanelProps {
@@ -17,8 +18,48 @@ export interface AgentPanelProps {
   model: string
   hasImage?: boolean
   disabled?: boolean
-  onAppendResult: (markdown: string) => void
+  contextKey: string
+  routingEnabled: boolean
+  autoRequest?: AgentAutoPlanRequest | null
+  onRoutingEnabledChange: (enabled: boolean) => void
+  onAutoRequestEnd: (requestId: number, outcome: AgentAutoRequestOutcome) => void
+  onAppendResult: (markdown: string, context: AgentResultContext) => Promise<void> | void
   onBusyChange?: (busy: boolean) => void
+}
+
+export interface AgentAutoPlanRequest {
+  id: number
+  goal: string
+  model: string
+  contextKey: string
+}
+
+export type AgentAutoRequestOutcome = 'completed' | 'cancelled' | 'failed' | 'unavailable'
+
+export interface AgentResultContext {
+  goal: string
+  requestId?: number
+}
+
+export interface AgentAutoPlanClaim {
+  handledRequestId: number | null
+}
+
+export function claimAgentAutoPlan(
+  claim: AgentAutoPlanClaim,
+  request: AgentAutoPlanRequest,
+  contextKey: string,
+  blocked: boolean,
+  start: () => boolean,
+): boolean {
+  if (
+    blocked
+    || request.contextKey !== contextKey
+    || claim.handledRequestId === request.id
+  ) return false
+  if (!start()) return false
+  claim.handledRequestId = request.id
+  return true
 }
 
 type Operation = 'capabilities' | 'planning' | `review:${string}` | `run:${string}`
@@ -33,6 +74,8 @@ interface OperationHandle {
   controller: AbortController
   generation: number
 }
+
+type PlannedTaskContext = AgentResultContext
 
 export const MAX_PERSISTED_AGENT_RESULT_CHARS = 30_000
 const MAX_STREAM_MARKDOWN_CHARS = 14_000
@@ -94,6 +137,17 @@ export function availableAgentCapabilities(
     enabled.push('python')
   }
   return enabled
+}
+
+export function hasInitiallyRunnablePython(proposal: AgentPlanProposal): boolean {
+  return proposal.plan.steps.some((step) => (
+    step.capability === 'python' && step.depends_on.length === 0
+  ))
+}
+
+export function isSingleRunnablePythonPlan(proposal: AgentPlanProposal): boolean {
+  const pythonSteps = proposal.plan.steps.filter((step) => step.capability === 'python')
+  return pythonSteps.length === 1 && pythonSteps[0].depends_on.length === 0
 }
 
 function indentedMarkdown(value: string): { markdown: string; truncated: boolean } {
@@ -197,7 +251,7 @@ function PythonStepControls({
         <ShieldCheck size={15} aria-hidden="true" />
         <span>No network, host mounts, or writable root. Reviewing does not execute code.</span>
       </div>
-      {!reviewed ? (
+      {!result && (!reviewed ? (
         <button
           className="agent-panel__button agent-panel__button--review"
           type="button"
@@ -225,7 +279,7 @@ function PythonStepControls({
             Run isolated Python
           </button>
         </div>
-      )}
+      ))}
       {result && (
         <div className="agent-panel__execution" aria-label="Isolated Python result">
           <div className="agent-panel__execution-meta">
@@ -255,6 +309,11 @@ export function AgentPanel({
   model,
   hasImage = false,
   disabled = false,
+  contextKey,
+  routingEnabled,
+  autoRequest = null,
+  onRoutingEnabledChange,
+  onAutoRequestEnd,
   onAppendResult,
   onBusyChange,
 }: AgentPanelProps) {
@@ -274,12 +333,17 @@ export function AgentPanel({
   const controllerRef = useRef<AbortController | null>(null)
   const appendResultRef = useRef(onAppendResult)
   const busyChangeRef = useRef(onBusyChange)
+  const autoRequestEndRef = useRef(onAutoRequestEnd)
+  const plannedTaskRef = useRef<PlannedTaskContext | null>(null)
+  const autoPlanClaimRef = useRef<AgentAutoPlanClaim>({ handledRequestId: null })
+  const contextKeyRef = useRef(contextKey)
   const busyNotifierRef = useRef<AgentBusyNotifier | null>(null)
   if (!busyNotifierRef.current) {
     busyNotifierRef.current = createAgentBusyNotifier(() => busyChangeRef.current)
   }
   appendResultRef.current = onAppendResult
   busyChangeRef.current = onBusyChange
+  autoRequestEndRef.current = onAutoRequestEnd
 
   const enabledCapabilities = useMemo(
     () => availableAgentCapabilities(capabilities, hasImage),
@@ -326,6 +390,33 @@ export function AgentPanel({
     }
   }, [])
 
+  const endAutoRequest = useCallback((
+    outcome: AgentAutoRequestOutcome,
+    explicitRequestId?: number,
+  ): void => {
+    const requestId = explicitRequestId ?? plannedTaskRef.current?.requestId
+    plannedTaskRef.current = null
+    if (requestId === undefined) return
+    try {
+      autoRequestEndRef.current(requestId, outcome)
+    } catch {
+      // Parent cleanup is advisory; the panel must always release its own lane.
+    }
+  }, [])
+
+  const clearPlan = useCallback((
+    outcome?: AgentAutoRequestOutcome,
+    explicitRequestId?: number,
+  ): void => {
+    cancelActive()
+    setProposal(null)
+    setReviewed({})
+    setResults({})
+    setError(null)
+    if (outcome) endAutoRequest(outcome, explicitRequestId)
+    else plannedTaskRef.current = null
+  }, [cancelActive, endAutoRequest])
+
   const loadCapabilities = useCallback(async (): Promise<void> => {
     const handle = beginOperation('capabilities')
     if (!handle) return
@@ -346,18 +437,25 @@ export function AgentPanel({
   }, [beginOperation, finishOperation, isCurrent])
 
   useEffect(() => {
-    if (expanded && !disabled && !capabilitiesLoaded && !busyRef.current) {
+    if (expanded && !autoRequest && !disabled && !capabilitiesLoaded && !busyRef.current) {
       void loadCapabilities()
     }
-  }, [capabilitiesLoaded, disabled, expanded, loadCapabilities])
+  }, [autoRequest, capabilitiesLoaded, disabled, expanded, loadCapabilities])
 
   useEffect(() => {
-    cancelActive()
-    setProposal(null)
-    setReviewed({})
-    setResults({})
-    setError(null)
-  }, [cancelActive, goal, hasImage, model])
+    if (autoRequest) return
+    clearPlan()
+  }, [autoRequest, clearPlan, goal, hasImage, model])
+
+  useEffect(() => {
+    const previous = contextKeyRef.current
+    contextKeyRef.current = contextKey
+    if (previous === contextKey) return
+    // The auto request is created from the newly persisted conversation, so
+    // that same transition is its binding rather than an invalidation.
+    if (autoRequest?.contextKey === contextKey) return
+    clearPlan(autoRequest ? 'cancelled' : undefined, autoRequest?.id)
+  }, [autoRequest, clearPlan, contextKey])
 
   useEffect(() => {
     mountedRef.current = true
@@ -369,9 +467,8 @@ export function AgentPanel({
 
   useEffect(() => {
     if (!disabled) return
-    cancelActive()
-    setReviewed({})
-  }, [cancelActive, disabled])
+    clearPlan(autoRequest ? 'cancelled' : undefined, autoRequest?.id)
+  }, [autoRequest, clearPlan, disabled])
 
   const toggleExpanded = (): void => {
     if (expanded) {
@@ -383,35 +480,101 @@ export function AgentPanel({
     setExpanded((current) => !current)
   }
 
-  const planTask = async (): Promise<void> => {
-    if (disabled) return
-    const trimmedGoal = goal.trim()
+  const planTask = useCallback((request?: AgentAutoPlanRequest): boolean => {
+    if (disabled) return false
+    const trimmedGoal = (request?.goal ?? goal).trim()
     if (!trimmedGoal) {
       setError('Write a goal before asking Agent mode to plan it.')
-      return
+      if (request) {
+        plannedTaskRef.current = { goal: trimmedGoal, requestId: request.id }
+        endAutoRequest('failed')
+      }
+      return false
+    }
+    if (trimmedGoal.length > MAX_AGENT_GOAL_CHARS) {
+      setExpanded(true)
+      setError(`Agent goals are limited to ${MAX_AGENT_GOAL_CHARS.toLocaleString()} characters. Shorten this execution request and try again.`)
+      if (request) {
+        plannedTaskRef.current = { goal: trimmedGoal, requestId: request.id }
+        endAutoRequest('failed')
+      }
+      return false
     }
     const handle = beginOperation('planning')
-    if (!handle) return
+    if (!handle) return false
+    const requestedModel = request?.model ?? model
+    plannedTaskRef.current = {
+      goal: trimmedGoal,
+      ...(request ? { requestId: request.id } : {}),
+    }
+    setExpanded(true)
     setError(null)
     setProposal(null)
     setReviewed({})
     setResults({})
-    try {
-      const response = await agentApi.propose(
-        trimmedGoal,
-        model,
-        enabledCapabilities,
-        handle.controller.signal,
-      )
-      if (!isCurrent(handle)) return
-      setProposal(response)
-    } catch (caught) {
-      if (!isCurrent(handle) || isAbort(caught)) return
-      setError(`Agent planning: ${friendlyError(caught)}`)
-    } finally {
-      finishOperation(handle)
-    }
-  }
+    void (async () => {
+      try {
+        let resolvedCapabilities = capabilities
+        if (!capabilitiesLoaded || !resolvedCapabilities) {
+          resolvedCapabilities = await agentApi.capabilities(handle.controller.signal)
+          if (!isCurrent(handle)) return
+          setCapabilities(resolvedCapabilities)
+          setCapabilitiesLoaded(true)
+        }
+        const available = availableAgentCapabilities(resolvedCapabilities, hasImage)
+        const proposalCapabilities: AgentCapability[] = request
+          ? available.includes('python') ? ['respond', 'python'] : ['respond']
+          : available
+        if (request && !proposalCapabilities.includes('python')) {
+          setError('Isolated Python is unavailable. Nothing ran; enable the operator sandbox and verify its local runtime before retrying.')
+          endAutoRequest('unavailable')
+          return
+        }
+        const response = await agentApi.propose(
+          trimmedGoal,
+          requestedModel,
+          proposalCapabilities,
+          handle.controller.signal,
+        )
+        if (!isCurrent(handle)) return
+        setProposal(response)
+        if (request && !isSingleRunnablePythonPlan(response)) {
+          setError('Agent did not stage exactly one runnable isolated-Python step. Nothing ran; ask for one self-contained script, or turn Agent routing off for a normal answer.')
+          endAutoRequest('unavailable')
+        }
+      } catch (caught) {
+        if (!isCurrent(handle) || isAbort(caught)) return
+        setCapabilitiesLoaded(true)
+        setError(`Agent planning: ${friendlyError(caught)} Nothing ran.`)
+        if (request) endAutoRequest('failed')
+      } finally {
+        finishOperation(handle)
+      }
+    })()
+    return true
+  }, [
+    beginOperation,
+    capabilities,
+    capabilitiesLoaded,
+    disabled,
+    endAutoRequest,
+    finishOperation,
+    goal,
+    hasImage,
+    isCurrent,
+    model,
+  ])
+
+  useEffect(() => {
+    if (!autoRequest) return
+    claimAgentAutoPlan(
+      autoPlanClaimRef.current,
+      autoRequest,
+      contextKey,
+      Boolean(disabled || busy),
+      () => planTask(autoRequest),
+    )
+  }, [autoRequest, busy, contextKey, disabled, planTask])
 
   const reviewPython = async (step: PythonPlanStep): Promise<void> => {
     if (disabled) return
@@ -465,10 +628,20 @@ export function AgentPanel({
       )
       if (!isCurrent(handle)) return
       setResults((current) => ({ ...current, [step.id]: execution }))
+      const taskContext = plannedTaskRef.current
       try {
-        appendResultRef.current(executionResultMarkdown(execution))
-      } catch {
-        setError('Python finished, but its result could not be appended to the conversation.')
+        if (!taskContext) throw new Error('The staged task context is no longer available.')
+        await appendResultRef.current(executionResultMarkdown(execution), {
+          goal: taskContext.goal,
+          ...(taskContext.requestId === undefined ? {} : { requestId: taskContext.requestId }),
+        })
+        if (taskContext.requestId !== undefined) endAutoRequest('completed')
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message
+          ? `Python finished, but its result could not be saved: ${caught.message.slice(0, 300)}`
+          : 'Python finished, but its result could not be appended to the conversation.')
+        // Keep the completed output visible and the task bound until the user
+        // explicitly discards it; a consumed execution cannot be retried safely.
       }
     } catch (caught) {
       if (!isCurrent(handle) || isAbort(caught)) return
@@ -491,28 +664,64 @@ export function AgentPanel({
   const pythonReady = enabledCapabilities.includes('python')
   const capabilitySummary = enabledCapabilities.map(capabilityLabel).join(' · ')
 
+  const discardPlan = (): void => {
+    clearPlan(plannedTaskRef.current?.requestId === undefined ? undefined : 'cancelled')
+  }
+
+  const changeRouting = (): void => {
+    if (busy) return
+    const next = !routingEnabled
+    if (!next) discardPlan()
+    try {
+      onRoutingEnabledChange(next)
+    } catch {
+      setError('The Agent routing preference could not be updated.')
+    }
+  }
+
   return (
     <section
       className="agent-panel"
       aria-label="Optional Agent mode"
       aria-disabled={disabled}
       data-expanded={expanded}
+      data-routing-enabled={routingEnabled}
     >
-      <button
-        className="agent-panel__toggle"
-        type="button"
-        disabled={disabled && !expanded}
-        aria-expanded={expanded}
-        aria-controls={contentId}
-        onClick={toggleExpanded}
-      >
-        <span className="agent-panel__toggle-icon" aria-hidden="true"><Bot size={17} /></span>
-        <span>
-          <strong>Agent mode</strong>
-          <small>{expanded ? 'Plan first · tools stay gated' : 'Off · open when a task needs tools'}</small>
-        </span>
-        <ChevronDown className="agent-panel__chevron" size={17} aria-hidden="true" />
-      </button>
+      <div className="agent-panel__header">
+        <button
+          className="agent-panel__toggle"
+          type="button"
+          disabled={disabled || Boolean(busy)}
+          aria-label={expanded ? 'Close Agent details' : 'Open Agent details'}
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          onClick={toggleExpanded}
+        >
+          <span className="agent-panel__toggle-icon" aria-hidden="true"><Bot size={17} /></span>
+          <span>
+            <strong>Agent mode</strong>
+            <small>{expanded
+              ? 'Plan first · exact code stays gated'
+              : routingEnabled
+                ? 'On · execution requests open a reviewed plan'
+                : 'Off · Send answers normally'}</small>
+          </span>
+          <ChevronDown className="agent-panel__chevron" size={17} aria-hidden="true" />
+        </button>
+        <button
+          className={`agent-panel__switch ${routingEnabled ? 'is-on' : ''}`}
+          type="button"
+          role="switch"
+          aria-checked={routingEnabled}
+          aria-label="Route explicit Python execution requests to Agent mode"
+          data-testid="agent-routing-toggle"
+          disabled={disabled || Boolean(busy)}
+          onClick={changeRouting}
+        >
+          <span aria-hidden="true"><i /></span>
+          <strong>{routingEnabled ? 'On' : 'Off'}</strong>
+        </button>
+      </div>
 
       {expanded && (
         <div
@@ -522,10 +731,10 @@ export function AgentPanel({
         >
           <div className="agent-panel__intro">
             <div>
-              <span className="agent-panel__eyebrow">PASSIVE PLANNER</span>
+              <span className="agent-panel__eyebrow">REVIEWED AGENT PLANNER</span>
               <p>
-                Only the current goal is sent. Web, Papers, and Vision run through normal Auto
-                Send; this planner never dispatches them.
+                Agent routing catches explicit Python execution requests. It saves the request,
+                stages exact code, and waits for your separate Review and Run actions.
               </p>
             </div>
             <span className={`agent-panel__sandbox ${pythonReady ? 'is-ready' : ''}`}>
@@ -544,7 +753,7 @@ export function AgentPanel({
             <button
               className="agent-panel__button agent-panel__button--plan"
               type="button"
-              disabled={disabled || Boolean(busy) || !goal.trim() || !capabilitiesLoaded}
+              disabled={disabled || Boolean(busy) || !goal.trim()}
               onClick={() => void planTask()}
             >
               <Bot size={16} aria-hidden="true" />
@@ -554,10 +763,19 @@ export function AgentPanel({
               <button
                 className="agent-panel__button agent-panel__button--cancel"
                 type="button"
-                onClick={() => cancelActive()}
+                onClick={() => clearPlan(plannedTaskRef.current?.requestId === undefined ? undefined : 'cancelled')}
               >
                 <CircleStop size={15} aria-hidden="true" />
                 Cancel
+              </button>
+            )}
+            {!busy && proposal && (
+              <button
+                className="agent-panel__button agent-panel__button--cancel"
+                type="button"
+                onClick={discardPlan}
+              >
+                Discard plan
               </button>
             )}
           </div>
@@ -584,12 +802,16 @@ export function AgentPanel({
                 <p className="agent-panel__warning" role="status">{proposal.warning}</p>
               )}
               <p className="agent-panel__handoff">
-                This is a preview. Use normal Auto Send for Answer, Web, Papers, and Vision.
-                Python alone has a separate reviewed run control below.
+                This is a preview, not an execution. Python runs only after you review the exact
+                displayed code and press Run isolated Python.
               </p>
               <ol className="agent-panel__steps">
                 {proposal.steps.map((step, index) => {
                   const pythonStep = pythonById.get(step.id)
+                  const pythonDependenciesReady = pythonStep?.depends_on.every((dependencyId) => (
+                    pythonById.has(dependencyId)
+                    && results[dependencyId]?.result.status === 'succeeded'
+                  )) ?? false
                   return (
                     <li className="agent-panel__step" key={step.id}>
                       <span className="agent-panel__step-number" aria-hidden="true">
@@ -610,13 +832,16 @@ export function AgentPanel({
                             reviewed={reviewed[step.id]}
                             result={results[step.id]}
                             busy={Boolean(busy)}
-                            disabled={disabled}
+                            disabled={disabled || !pythonDependenciesReady}
                             onReview={() => void reviewPython(pythonStep)}
                             onRun={() => {
                               const confirmation = reviewed[step.id]
                               if (confirmation) void runPython(pythonStep, confirmation)
                             }}
                           />
+                        )}
+                        {pythonStep && !pythonDependenciesReady && (
+                          <small>Run controls stay locked until every executable Python dependency succeeds.</small>
                         )}
                       </div>
                     </li>

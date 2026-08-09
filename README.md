@@ -164,12 +164,19 @@ for the API, quotas, context window, and renderer trust boundary.
 
 ## Optional Agent mode
 
-The collapsed **Agent** panel is mounted in Playground but remains separate
-from ordinary chat. It submits only the current goal to a local model and shows
-a validated, non-executable capability plan. Answer, Web, Papers, and Vision
-steps remain previews; the user handles them through the normal Auto chat path.
-Python is the only executable tool, and it remains unavailable until the
-operator installs the fixed sandbox image and explicitly enables it:
+The collapsed **Agent** panel is mounted in Playground. Its routing toggle is
+on by default and remembers the selected on/off state in that browser. With
+routing on, an explicit request to run Python or execute code through the
+normal **Send** action opens the panel and stages a validated, non-executable
+plan for the current goal. Ordinary prompts continue through normal chat, and
+turning routing off still leaves the panel's manual **Plan** action available.
+The remembered preference contains only the routing boolean; it does not store
+the prompt, code, confirmation token, or execution result.
+
+Answer, Web, Papers, and Vision steps remain previews; the user handles them
+through the normal Auto chat path. Python is the only executable tool, and it
+remains unavailable until the operator installs the fixed sandbox image and
+explicitly enables it:
 
 ```bash
 scripts/setup-agent-sandbox.sh
@@ -180,9 +187,11 @@ scripts/verify-agent-sandbox.sh
 LOCALLLM_AGENT_CODE_EXECUTION_ENABLED=true
 ```
 
-Restart the API after opting in. Every Python run still requires a visible,
-code-hash-bound, short-lived, single-use confirmation followed by an explicit
-**Run** action. The fixed Docker profile has no network or host mounts, a
+Restart the API after opting in. Routing never runs code by itself. Every
+Python run still requires the exact code to remain visible, an explicit
+**Review isolated Python** action that obtains a code-hash-bound, short-lived,
+single-use confirmation, and a separate **Run isolated Python** action. The
+fixed Docker profile has no network or host mounts, a
 read-only root filesystem, a non-root user, dropped capabilities, and bounded
 CPU, memory, runtime, processes, and output. It is containment for trusted local
 operation, not a defense against an unknown Docker/kernel escape. Read
@@ -356,9 +365,12 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 - Binary strings and fetched webpages are treated as untrusted data, not model instructions.
 - Model-authored Markdown cannot create active links, remote images, or raw HTML;
   GFM and KaTeX are rendered through a constrained component surface.
-- Ordinary chat never executes Agent Python. Even after operator opt-in, each
-  exact program needs a fresh confirmation and runs in the fixed offline Docker
-  sandbox. The loopback boundary is not per-user authorization.
+- Ordinary prompts never execute Agent Python. The default-on, remembered
+  browser toggle can route an explicit execution request from **Send** into a
+  visible plan, but routing is not execution and the preference stores only its
+  boolean state. Even after operator opt-in, each exact program needs explicit
+  **Review** and **Run** actions and runs in the fixed offline Docker sandbox.
+  The loopback boundary is not per-user authorization.
 - Image generation is disabled by default and accepts no caller-selected model,
   path, URL, or upload. Its fresh-root Bubblewrap worker has private PID/network/
   IPC/UTS/runtime namespaces, no host home/repository/runtime sockets, and only
