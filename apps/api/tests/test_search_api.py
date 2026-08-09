@@ -74,6 +74,74 @@ def test_quick_search_endpoint_returns_normalized_ranked_sources() -> None:
     assert source["provenance"][0]["provider"] == "crossref"
 
 
+def test_quick_search_redacts_embedded_url_secrets_at_the_provider_boundary() -> None:
+    captured: list[str] = []
+    with TestClient(app) as client:
+        manager = client.app.state.research
+
+        async def search(query: str, mode: str, limit: int, **_kwargs):
+            captured.append(query)
+            return SearchOutcome(query=query, mode=mode, sources=[], providers=[])
+
+        manager.search.search = search
+        response = client.post(
+            "/api/search",
+            json={
+                "query": (
+                    "Search [source](https://example.org/private?token=TOPSECRET) "
+                    "and path:/home/alice/secret.txt"
+                ),
+                "mode": "web",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured == ["Search example.org and local path"]
+    assert "TOPSECRET" not in response.text
+    assert "alice" not in response.text.casefold()
+
+
+def test_quick_search_suppresses_wrapped_labeled_and_encoded_private_values() -> None:
+    queries = [
+        "Verify 【/home/alice/My Project/TOPSECRET plan.txt】",
+        "Verify URL:corpserver/private/TOPSECRET",
+        "Verify example.com%252Fprivate%252FTOPSECRET?token=SIGNED",
+        "Verify [path](/home/alice/My (Project) TOPSECRET/file.txt)",
+        "Verify sms:+85212345678?body=TOPSECRET",
+        "Verify github.com:private/TOPSECRET.git",
+        "Verify ethereum:TOPSECRET",
+        "Verify gitlab.com:TOPSECRET.git",
+        "Verify data:text/plain;base64,VE9QU0VDUkVU",
+        "Verify https://example.com/private,TOPSECRET",
+    ]
+    captured: list[str] = []
+    with TestClient(app) as client:
+        manager = client.app.state.research
+
+        async def search(query: str, mode: str, limit: int, **_kwargs):
+            captured.append(query)
+            return SearchOutcome(query=query, mode=mode, sources=[], providers=[])
+
+        manager.search.search = search
+        for query in queries:
+            response = client.post("/api/search", json={"query": query, "mode": "web"})
+            assert response.status_code == 200
+
+    assert captured == [
+        "Verify local path",
+        "Verify network resource",
+        "Verify example.com",
+        "Verify local path",
+        "Verify public resource",
+        "Verify github.com",
+        "Verify public resource",
+        "Verify gitlab.com",
+        "Verify public resource",
+        "Verify example.com",
+    ]
+    assert all("TOPSECRET" not in query and "alice" not in query.casefold() for query in captured)
+
+
 def test_search_endpoint_bounds_mode_query_and_result_count() -> None:
     with TestClient(app) as client:
         bad_mode = client.post("/api/search", json={"query": "valid query", "mode": "scrape"})

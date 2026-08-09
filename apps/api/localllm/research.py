@@ -17,6 +17,7 @@ import trafilatura
 
 from .catalog import resolve_model
 from .config import Settings
+from .query_privacy import redact_url_tokens
 from .search import FederatedSearch, ProviderDiagnostic, ResearchSource, SearchMode, SearchOutcome
 
 ResearchDepth = Literal["quick", "standard", "deep"]
@@ -279,6 +280,9 @@ class ResearchManager:
     async def quick_search(
         self, query: str, mode: SearchMode = "both", limit: int = 12
     ) -> SearchOutcome:
+        query = re.sub(r"\s+", " ", redact_url_tokens(query)).strip()[:800]
+        if len(query) < 3:
+            query = "public evidence"
         return await self.search.search(
             query,
             mode,
@@ -319,7 +323,9 @@ class ResearchManager:
     async def _plan_queries(self, task: ResearchTask) -> list[str]:
         """Build stable query variants without depending on model tool-call reliability."""
 
-        question = re.sub(r"\s+", " ", task.question).strip()[:800]
+        question = re.sub(r"\s+", " ", redact_url_tokens(task.question)).strip()[:800]
+        if len(question) < 3:
+            question = "public evidence"
         if task.mode == "web":
             variants = [question, f"{question} official documentation", f"{question} evidence"]
         elif task.mode == "papers":

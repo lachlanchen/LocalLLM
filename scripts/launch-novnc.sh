@@ -85,6 +85,45 @@ pid_is_running() {
   [[ -n "$process_state" && "$process_state" != Z* ]]
 }
 
+display_process_is_running() {
+  ps -eo comm=,args= 2>/dev/null | awk -v display=":$display_number" '
+    $1 == "Xvfb" {
+      for (field = 2; field <= NF; field++) {
+        if ($field == display) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+cleanup_stale_display_artifacts() {
+  local lock_path="/tmp/.X${display_number}-lock"
+  local socket_path="/tmp/.X11-unix/X${display_number}"
+  local lock_pid=""
+
+  [[ -e "$lock_path" || -S "$socket_path" ]] || return 0
+  # An unreadable lock cannot be inspected well enough to distinguish a stale
+  # artifact from another user's live display, so never remove it automatically.
+  [[ ! -e "$lock_path" || -r "$lock_path" ]] || return 1
+  if [[ -r "$lock_path" ]]; then
+    lock_pid="$(tr -d '[:space:]' <"$lock_path")"
+    # A live PID is treated as foreign even when its command is unrelated: PID
+    # reuse makes deleting another session's lock unsafe.
+    if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] && pid_is_running "$lock_pid"; then
+      return 1
+    fi
+    # A malformed lock cannot be proved stale, so fail closed.
+    [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  fi
+  display_process_is_running && return 1
+
+  rm -f -- "$lock_path" "$socket_path"
+  echo "Removed stale X display artifacts for :$display_number" >&2
+}
+
 port_is_listening() {
   local port="$1"
   local listeners
@@ -232,7 +271,7 @@ start_exit_handler() {
 }
 
 start() {
-  require_commands curl google-chrome grep mkdir nohup ps rm sleep ss tail timeout \
+  require_commands awk curl google-chrome grep mkdir nohup ps rm sleep ss tail timeout tr \
     websockify Xvfb x11vnc xdotool
   [[ -r "$novnc_web_root/vnc.html" ]] ||
     die "missing noVNC client: $novnc_web_root/vnc.html"
@@ -240,7 +279,12 @@ start() {
   mkdir -p "$profile_dir" "$log_dir" "$runtime_dir/evidence"
   if [[ -e "/tmp/.X${display_number}-lock" ]] &&
      ! pid_is_owned "$runtime_dir/xvfb.pid" "Xvfb :$display_number"; then
-    die "display :$display_number is occupied by another process"
+    cleanup_stale_display_artifacts ||
+      die "display :$display_number is occupied by another process"
+  elif [[ -S "/tmp/.X11-unix/X${display_number}" ]] &&
+       ! pid_is_owned "$runtime_dir/xvfb.pid" "Xvfb :$display_number"; then
+    cleanup_stale_display_artifacts ||
+      die "display :$display_number is occupied by another process"
   fi
   local candidate_port
   for candidate_port in "$vnc_port" "$novnc_port" "$cdp_port"; do
@@ -333,6 +377,9 @@ stop() {
     fi
     rm -f -- "$pid_file"
   done
+  # Xorg normally removes these paths itself. Recover only when the lock PID is
+  # dead and no matching Xvfb process remains; live or ambiguous displays stay.
+  cleanup_stale_display_artifacts || true
 }
 
 action="${1:-start}"
@@ -344,7 +391,7 @@ case "$action" in
     status
     ;;
   stop)
-    require_commands grep ps rm sleep
+    require_commands awk grep ps rm sleep tr
     stop
     ;;
   *) echo "Usage: $0 {start|status|stop}" >&2; exit 2 ;;

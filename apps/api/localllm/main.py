@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import math
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Literal, TypeVar
@@ -19,9 +20,24 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .agent_runtime import router as agent_runtime_router
 from .catalog import MODEL_ALIASES, MODEL_CATALOG, resolve_model
-from .config import Settings, get_settings
+from .config import Settings, get_settings, prepare_private_data_dir
+from .conversations import (
+    MAX_SUMMARY_CHARS,
+    ConversationCapacityError,
+    ConversationCompactRequest,
+    ConversationConflictError,
+    ConversationCreate,
+    ConversationDelete,
+    ConversationStore,
+    ConversationUpdate,
+    deterministic_summary,
+    harden_database_permissions,
+    summary_prompt,
+)
 from .grounded_chat import router as grounded_chat_router
+from .image_generation import router as image_generation_router
 from .mcp_bridge import investigate_with_mcp, mcp_status
 from .ollama import OllamaClient, OllamaStream
 from .research import ResearchCapacityError, ResearchManager
@@ -116,7 +132,12 @@ MAX_RESEARCH_JSON_BYTES = 32 * 1024
 MAX_OPENAI_JSON_BYTES = 25 * 1024 * 1024
 REQUEST_BODY_LIMITS = {
     "/api/agent/chat": MAX_OPENAI_JSON_BYTES,
+    "/api/agent/code/confirmations": 20 * 1024,
+    "/api/agent/code/executions": 40 * 1024,
+    "/api/agent/plans/propose": 20 * 1024,
+    "/api/agent/plans/validate": 20 * 1024,
     "/api/chat/completions": MAX_OPENAI_JSON_BYTES,
+    "/api/images/jobs": 8 * 1024,
     "/api/models/pull": 8 * 1024,
     "/api/re/inspect": MAX_UPLOAD_REQUEST_SIZE,
     "/api/re/mcp/investigate": 32 * 1024,
@@ -127,6 +148,19 @@ REQUEST_BODY_LIMITS = {
     "/v1/embeddings": 8 * 1024 * 1024,
     "/v1/responses": MAX_OPENAI_JSON_BYTES,
 }
+_CONVERSATION_MUTATION_PATH = re.compile(r"^/api/conversations(?:/conv_[0-9a-f]{32})?$")
+_CONVERSATION_COMPACT_PATH = re.compile(r"^/api/conversations/conv_[0-9a-f]{32}/compact$")
+
+
+def _request_body_limit(path: str) -> int | None:
+    exact = REQUEST_BODY_LIMITS.get(path)
+    if exact is not None:
+        return exact
+    if _CONVERSATION_MUTATION_PATH.fullmatch(path):
+        return MAX_OPENAI_JSON_BYTES
+    if _CONVERSATION_COMPACT_PATH.fullmatch(path):
+        return 8 * 1024
+    return None
 
 
 class RequestBodyLimitMiddleware:
@@ -164,7 +198,7 @@ class RequestBodyLimitMiddleware:
         }:
             await self.app(scope, receive, send)
             return
-        limit = REQUEST_BODY_LIMITS.get(str(scope.get("path", "")))
+        limit = _request_body_limit(str(scope.get("path", "")))
         if limit is None:
             await self.app(scope, receive, send)
             return
@@ -318,11 +352,11 @@ async def _bounded_json_model(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    settings.data_dir.chmod(0o700)
+    prepare_private_data_dir(settings.data_dir)
     app.state.settings = settings
     app.state.ollama = OllamaClient(settings)
     app.state.research = ResearchManager(settings)
+    app.state.conversations = ConversationStore(settings.data_dir)
     try:
         yield
     finally:
@@ -351,7 +385,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-LocalLLM-Key"],
 )
 
@@ -390,7 +424,7 @@ async def browser_security_boundary(request: Request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; "
+        "default-src 'self'; connect-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; "
         "style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; "
         "frame-ancestors 'none'"
     )
@@ -398,6 +432,8 @@ async def browser_security_boundary(request: Request, call_next):
 
 
 app.include_router(grounded_chat_router)
+app.include_router(agent_runtime_router)
+app.include_router(image_generation_router)
 
 
 def get_ollama(request: Request) -> OllamaClient:
@@ -406,6 +442,10 @@ def get_ollama(request: Request) -> OllamaClient:
 
 def get_research(request: Request) -> ResearchManager:
     return request.app.state.research
+
+
+def get_conversations(request: Request) -> ConversationStore:
+    return request.app.state.conversations
 
 
 def require_api_key(
@@ -582,6 +622,161 @@ async def pull_model(
 async def app_chat(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
     payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
     return await _proxy_openai("/v1/chat/completions", payload, ollama)
+
+
+@app.get("/api/conversations")
+async def list_conversations(
+    store: ConversationStore = Depends(get_conversations),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(store.list)
+
+
+@app.post("/api/conversations", status_code=201)
+async def create_conversation(
+    request: Request,
+    store: ConversationStore = Depends(get_conversations),
+) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, ConversationCreate, MAX_OPENAI_JSON_BYTES)
+    try:
+        conversation = await asyncio.to_thread(store.create, payload)
+    except ConversationCapacityError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    harden_database_permissions(store)
+    return conversation
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    store: ConversationStore = Depends(get_conversations),
+) -> dict[str, Any]:
+    conversation = await asyncio.to_thread(store.get, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.patch("/api/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: str,
+    request: Request,
+    store: ConversationStore = Depends(get_conversations),
+) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, ConversationUpdate, MAX_OPENAI_JSON_BYTES)
+    try:
+        conversation = await asyncio.to_thread(store.update, conversation_id, payload)
+    except ConversationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConversationCapacityError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    harden_database_permissions(store)
+    return conversation
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    request: Request,
+    store: ConversationStore = Depends(get_conversations),
+) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, ConversationDelete, 8 * 1024)
+    try:
+        deleted = await asyncio.to_thread(
+            store.delete,
+            conversation_id,
+            expected_revision=payload.expected_revision,
+        )
+    except ConversationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    harden_database_permissions(store)
+    return {"deleted": True, "id": conversation_id}
+
+
+@app.post("/api/conversations/{conversation_id}/compact")
+async def compact_conversation(
+    conversation_id: str,
+    request: Request,
+    store: ConversationStore = Depends(get_conversations),
+    ollama: OllamaClient = Depends(get_ollama),
+) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, ConversationCompactRequest, 8 * 1024)
+    conversation = await asyncio.to_thread(store.get, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    target_count = max(0, len(conversation["messages"]) - payload.keep_recent)
+    cursor = min(int(conversation["summarized_message_count"]), target_count)
+    if target_count <= cursor:
+        return {
+            "conversation": conversation,
+            "compacted": False,
+            "summary_method": conversation["summary_method"],
+        }
+
+    messages_to_merge = conversation["messages"][cursor:target_count]
+    summary = deterministic_summary(conversation["summary"], messages_to_merge)
+    method = "extractive"
+    try:
+        response = await asyncio.wait_for(
+            ollama.proxy_json(
+                "/api/chat",
+                {
+                    "model": payload.model or conversation["model"],
+                    "messages": summary_prompt(conversation["summary"], messages_to_merge),
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_ctx": 32_768,
+                        "num_predict": 2_048,
+                    },
+                },
+            ),
+            timeout=60.0,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError("The local summary model rejected the request")
+        response_payload = response.json()
+        message_payload = (
+            response_payload.get("message") if isinstance(response_payload, dict) else None
+        )
+        candidate = message_payload.get("content", "") if isinstance(message_payload, dict) else ""
+        if not isinstance(candidate, str) or not candidate.strip():
+            raise RuntimeError("The local summary model returned no visible summary")
+        candidate = "".join(
+            character if character in "\n\t" or ord(character) >= 32 else " "
+            for character in candidate
+        ).strip()
+        if not candidate:
+            raise RuntimeError("The local summary model returned no safe summary text")
+        summary = candidate[:MAX_SUMMARY_CHARS].rstrip()
+        method = "model"
+    except (HTTPException, httpx.HTTPError, TimeoutError, ValueError, RuntimeError):
+        # Compaction remains available during model outages. The extractive summary
+        # labels itself as a fallback and samples every compacted turn.
+        pass
+
+    try:
+        updated = await asyncio.to_thread(
+            store.apply_summary,
+            conversation_id,
+            expected_revision=conversation["revision"],
+            summary=summary,
+            summarized_message_count=target_count,
+            method=method,
+        )
+    except ConversationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConversationCapacityError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    harden_database_permissions(store)
+    return {"conversation": updated, "compacted": True, "summary_method": method}
 
 
 @app.get("/api/search/status")

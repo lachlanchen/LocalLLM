@@ -13,6 +13,7 @@ import {
   Cloud,
   Code2,
   Cpu,
+  Database,
   Download,
   ExternalLink,
   FileCode2,
@@ -21,14 +22,17 @@ import {
   GitBranch,
   Globe2,
   HardDrive,
+  History,
   ImagePlus,
   KeyRound,
   Layers3,
   LoaderCircle,
   Menu,
   MessageCircleMore,
+  MessageSquarePlus,
   MonitorCog,
   Paperclip,
+  Pencil,
   Play,
   RefreshCw,
   Search,
@@ -42,8 +46,9 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fileToDataUrl, formatBytes, imageFileError, pullModel, streamAgentChat } from './api'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { AgentPanel } from './AgentPanel'
+import { ApiError, api, fileToDataUrl, formatBytes, imageFileError, pullModel, streamAgentChat } from './api'
 import { BinaryDropZone } from './BinaryDropZone'
 import {
   abortBinaryOperation,
@@ -53,6 +58,23 @@ import {
   isCurrentBinaryOperation,
 } from './binaryLifecycle'
 import { CHAT_MODES, safeExternalHref, safeHostname } from './grounding'
+import { ImageGenerationPanel } from './ImageGenerationPanel'
+import {
+  CONTEXT_RECENT_MESSAGES,
+  MAX_CHAT_INPUT_CHARS,
+  chatInputError,
+  conversationTitle as deriveConversationTitle,
+  deleteWithConflictReload,
+  formatConversationTime,
+  hasInferenceImage,
+  inferenceContext,
+  isTranscriptNearBottom,
+  persistDraftBeforeInference,
+  restoredMessages,
+  saveWithRevisionRetry,
+  shouldAutoCompact,
+  storedMessages,
+} from './conversationState'
 import {
   chooseAvailableAlias,
   isAliasInstalled,
@@ -86,6 +108,8 @@ import type {
   CatalogResponse,
   ChatMode,
   ChatMessage,
+  ConversationFull,
+  ConversationListItem,
   McpInvestigationResult,
   McpStatus,
   ModelInfo,
@@ -115,6 +139,39 @@ const PROMPTS = [
 
 function uid() {
   return crypto.randomUUID()
+}
+
+function trapTabWithin(event: KeyboardEvent, container: HTMLElement | null) {
+  if (event.key !== 'Tab' || !container) return
+  const controls = Array.from(container.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  )).filter((control) => control.getClientRects().length > 0)
+  if (!controls.length) return
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (event.shiftKey && (document.activeElement === first || !container.contains(document.activeElement))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (document.activeElement === last || !container.contains(document.activeElement))) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+function listItemFromConversation(conversation: ConversationFull): ConversationListItem {
+  return {
+    id: conversation.id,
+    revision: conversation.revision,
+    title: conversation.title,
+    model: conversation.model,
+    mode: conversation.mode,
+    created_at: conversation.created_at,
+    updated_at: conversation.updated_at,
+    summarized_message_count: conversation.summarized_message_count,
+    summary_method: conversation.summary_method,
+    message_count: conversation.message_count,
+    has_summary: Boolean(conversation.summary),
+  }
 }
 
 function Logo() {
@@ -166,12 +223,49 @@ function AppHeader({ status, onRefresh }: { status: SystemStatus | null; onRefre
 }
 
 function Sidebar({ view, setView, open, setOpen }: { view: ViewId; setView: (view: ViewId) => void; open: boolean; setOpen: (value: boolean) => void }) {
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
+
+  const closeNavigation = useCallback((restoreFocus = true) => {
+    setOpen(false)
+    if (restoreFocus && window.matchMedia('(max-width: 900px)').matches) {
+      window.requestAnimationFrame(() => menuButtonRef.current?.focus())
+    }
+  }, [setOpen])
+
+  useEffect(() => {
+    if (!open) return
+    const focusFrame = window.requestAnimationFrame(() => {
+      sidebarRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus()
+    })
+    const handleNavigationKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeNavigation()
+        return
+      }
+      trapTabWithin(event, sidebarRef.current)
+    }
+    window.addEventListener('keydown', handleNavigationKeys)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      window.removeEventListener('keydown', handleNavigationKeys)
+    }
+  }, [closeNavigation, open])
+
   return (
     <>
-      <button className="mobile-menu" onClick={() => setOpen(!open)} aria-label="Toggle navigation"><Menu size={20} /></button>
-      <aside className={`sidebar ${open ? 'is-open' : ''}`}>
+      <button
+        ref={menuButtonRef}
+        className="mobile-menu"
+        onClick={() => open ? closeNavigation() : setOpen(true)}
+        aria-label={open ? 'Close navigation' : 'Open navigation'}
+        aria-expanded={open}
+        aria-controls="primary-sidebar"
+      ><Menu size={20} /></button>
+      <aside ref={sidebarRef} id="primary-sidebar" className={`sidebar ${open ? 'is-open' : ''}`} aria-label="LocalLLM navigation">
         <Logo />
-        <nav>
+        <nav aria-label="Primary workspace">
           <span className="nav-eyebrow">WORKSPACES</span>
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon
@@ -180,7 +274,8 @@ function Sidebar({ view, setView, open, setOpen }: { view: ViewId; setView: (vie
                 key={item.id}
                 data-testid={`nav-${item.id}`}
                 className={`nav-item ${view === item.id ? 'is-active' : ''}`}
-                onClick={() => { setView(item.id); setOpen(false) }}
+                aria-current={view === item.id ? 'page' : undefined}
+                onClick={() => { setView(item.id); closeNavigation() }}
               >
                 <Icon size={18} strokeWidth={1.8} />
                 <span><strong>{item.label}</strong><small>{item.hint}</small></span>
@@ -195,7 +290,7 @@ function Sidebar({ view, setView, open, setOpen }: { view: ViewId; setView: (vie
         </div>
         <div className="sidebar-footer"><span>LOCAL FIRST</span><span className="footer-line" /><span>v0.1</span></div>
       </aside>
-      {open && <button className="sidebar-scrim" onClick={() => setOpen(false)} aria-label="Close navigation" />}
+      {open && <button className="sidebar-scrim" onClick={() => closeNavigation()} aria-label="Close navigation" />}
     </>
   )
 }
@@ -270,6 +365,7 @@ function HeroTitle({ eyebrow, title, accent, copy }: { eyebrow: string; title: s
 }
 
 const CHAT_MODE_ICONS: Record<ChatMode, LucideIcon> = {
+  auto: BrainCircuit,
   local: ShieldCheck,
   web: Globe2,
   papers: BookOpen,
@@ -333,6 +429,28 @@ function SourceCards({ sources, compact = false }: { sources: ResearchSource[]; 
   )
 }
 
+const ChatMessageBubble = memo(function ChatMessageBubble({
+  message,
+  fallbackModel,
+}: {
+  message: ChatMessage
+  fallbackModel: string
+}) {
+  return (
+    <article className={`message ${message.role}`} data-testid={`chat-message-${message.role}`} data-status={message.pending ? 'running' : 'complete'}>
+      <div className="avatar">{message.role === 'user' ? 'YOU' : <Sparkles size={16} />}</div>
+      <div className="message-body">
+        <span className="message-author">{message.role === 'user' ? 'You' : 'LocalLLM'}<small>{message.role === 'assistant' ? message.model ?? fallbackModel : 'saved turn'}</small>{message.mode && <i>{CHAT_MODES.find((item) => item.id === message.mode)?.shortLabel}</i>}</span>
+        {message.image && <img src={message.image} alt="User attachment" />}
+        {message.activity && message.pending && <div className="agent-activity" role="status" aria-live="polite">{message.activity.map((item, index) => <span key={item} className={index === message.activity!.length - 1 ? 'is-current' : ''}>{index === message.activity!.length - 1 ? <LoaderCircle className="spin" size={12} /> : <Check size={12} />}{item}</span>)}</div>}
+        {message.pending && !message.content ? <div className="typing" aria-label="Local model is responding"><i /><i /><i /></div> : <SafeModelMarkdown>{message.content}</SafeModelMarkdown>}
+        {message.warning && <div className="message-warning"><Activity size={13} />{message.warning}</div>}
+        {message.sources && <SourceCards sources={message.sources} compact />}
+      </div>
+    </article>
+  )
+})
+
 function ProviderStatusStrip({ status }: { status: SearchStatus | null }) {
   if (!status) return <div className="provider-strip is-loading"><LoaderCircle className="spin" size={13} /> Loading provider configuration…</div>
   const enabled = status.providers.filter((provider) => provider.enabled)
@@ -352,25 +470,161 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const [input, setInput] = useState(initialPrompt ?? '')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [image, setImage] = useState<string | undefined>()
-  const [mode, setMode] = useState<ChatMode>('local')
+  const [mode, setMode] = useState<ChatMode>('auto')
   const [searchStatus, setSearchStatus] = useState<SearchStatus | null>(null)
   const [busy, setBusy] = useState(false)
+  const [agentBusy, setAgentBusy] = useState(false)
+  const [imageGenerationBusy, setImageGenerationBusy] = useState(false)
   const [error, setError] = useState('')
+  const [conversations, setConversations] = useState<ConversationListItem[]>([])
+  const [conversationId, setConversationId] = useState<string | null>(null)
+  const [conversationTitle, setConversationTitle] = useState('New conversation')
+  const [summary, setSummary] = useState('')
+  const [summarizedMessageCount, setSummarizedMessageCount] = useState(0)
+  const [summaryMethod, setSummaryMethod] = useState<'model' | 'extractive' | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 1100)
+  const [sessionBusy, setSessionBusy] = useState(false)
+  const [sessionStatus, setSessionStatus] = useState<'new' | 'loading' | 'saving' | 'saved' | 'compacting' | 'error'>('loading')
+  const [deleteArmedId, setDeleteArmedId] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
   const requestLifecycleRef = useRef(createRequestLifecycle())
   const abortRef = useRef<AbortController | null>(null)
   const fileReadGenerationRef = useRef(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const followTranscriptRef = useRef(true)
+  const forceTranscriptScrollRef = useRef(true)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const historyToggleRef = useRef<HTMLButtonElement>(null)
+  const historyCloseRef = useRef<HTMLButtonElement>(null)
+  const historyPanelRef = useRef<HTMLElement>(null)
+  const historyFocusRequestedRef = useRef(false)
+  const conversationIdRef = useRef<string | null>(null)
+  const conversationRevisionRef = useRef<number | null>(null)
+  const persistedTranscriptRef = useRef<ChatMessage[]>([])
+  const sessionGenerationRef = useRef(0)
+  const sessionAbortRef = useRef<AbortController | null>(null)
+  const sessionBusyRef = useRef(false)
+  const compactionRef = useRef(false)
   const textModel = chooseAvailableAlias(catalog, model, 'text')
   const availableVisionModel = chooseAvailableAlias(catalog, visionModel, 'vision')
-  const hasImageContext = Boolean(image || messages.some((message) => message.image))
+  const hasImageContext = Boolean(image || hasInferenceImage(messages, summarizedMessageCount))
   const activeModel = hasImageContext ? availableVisionModel : textModel
+  const capabilityBusy = agentBusy || imageGenerationBusy
   const threadMode = messages.length ? messages[messages.length - 1].mode ?? mode : mode
   const threadLabel = threadMode === 'local'
-    ? 'LOCAL THREAD'
-    : `${CHAT_MODES.find((item) => item.id === threadMode)?.shortLabel.toUpperCase() ?? 'GROUNDED'}-GROUNDED THREAD`
+    ? 'LOCAL SESSION'
+    : threadMode === 'auto'
+      ? 'AUTO SESSION'
+      : `${CHAT_MODES.find((item) => item.id === threadMode)?.shortLabel.toUpperCase() ?? 'GROUNDED'} SESSION`
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages])
+  const markSessionBusy = useCallback((value: boolean) => {
+    sessionBusyRef.current = value
+    setSessionBusy(value)
+  }, [])
+
+  const closeHistory = useCallback((restoreFocus = true) => {
+    historyFocusRequestedRef.current = false
+    setHistoryOpen(false)
+    if (restoreFocus) window.requestAnimationFrame(() => historyToggleRef.current?.focus())
+  }, [])
+
+  const toggleHistory = useCallback(() => {
+    if (historyOpen) {
+      closeHistory()
+      return
+    }
+    historyFocusRequestedRef.current = true
+    setHistoryOpen(true)
+  }, [closeHistory, historyOpen])
+
+  const updateConversationList = useCallback((conversation: ConversationFull) => {
+    const item = listItemFromConversation(conversation)
+    setConversations((current) => [item, ...current.filter((entry) => entry.id !== item.id)]
+      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at)))
+  }, [])
+
+  const adoptConversation = useCallback((
+    conversation: ConversationFull,
+    options: { preserveComposer?: boolean } = {},
+  ) => {
+    forceTranscriptScrollRef.current = true
+    followTranscriptRef.current = true
+    invalidateRequest(requestLifecycleRef.current)
+    abortRef.current?.abort()
+    abortRef.current = null
+    setBusy(false)
+    conversationIdRef.current = conversation.id
+    conversationRevisionRef.current = conversation.revision
+    setConversationId(conversation.id)
+    setConversationTitle(conversation.title)
+    setTitleDraft(conversation.title)
+    if (!options.preserveComposer) {
+      setMode(conversation.mode)
+      if (/vision|qwen3-vl/i.test(conversation.model)) setVisionModel(conversation.model)
+      else setModel(conversation.model)
+    }
+    const restored = restoredMessages(conversation.messages)
+    persistedTranscriptRef.current = restored
+    setMessages(restored)
+    setSummary(conversation.summary)
+    setSummarizedMessageCount(conversation.summarized_message_count)
+    setSummaryMethod(conversation.summary_method)
+    if (!options.preserveComposer) {
+      setImage(undefined)
+      setInput('')
+    }
+    setError('')
+    setRenaming(false)
+    setSessionStatus('saved')
+    updateConversationList(conversation)
+  }, [updateConversationList])
+
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript || (!forceTranscriptScrollRef.current && !followTranscriptRef.current)) return
+    forceTranscriptScrollRef.current = false
+    const frame = window.requestAnimationFrame(() => {
+      transcript.scrollTop = transcript.scrollHeight
+      followTranscriptRef.current = true
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages])
+  useEffect(() => {
+    const textarea = composerTextareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 140)}px`
+  }, [input])
+  useEffect(() => {
+    if (!historyOpen || !historyFocusRequestedRef.current) return
+    historyFocusRequestedRef.current = false
+    const frame = window.requestAnimationFrame(() => historyCloseRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [historyOpen])
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
+      if (historyOpen && window.matchMedia('(max-width: 650px)').matches) {
+        trapTabWithin(event, historyPanelRef.current)
+        if (event.defaultPrevented) return
+      }
+      if (event.key !== 'Escape') return
+      if (deleteArmedId) {
+        event.preventDefault()
+        setDeleteArmedId('')
+        return
+      }
+      if (historyOpen) {
+        event.preventDefault()
+        closeHistory()
+      }
+    }
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [closeHistory, deleteArmedId, historyOpen])
   useEffect(() => {
     if (textModel && textModel !== model) setModel(textModel)
   }, [model, textModel])
@@ -380,22 +634,303 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   useEffect(() => {
     void api.searchStatus().then(setSearchStatus).catch(() => setSearchStatus(null))
   }, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    const generation = ++sessionGenerationRef.current
+    sessionAbortRef.current = controller
+    markSessionBusy(true)
+    setSessionStatus('loading')
+    void api.conversations(controller.signal).then(async (response) => {
+      if (sessionGenerationRef.current !== generation) return
+      setConversations(response.conversations)
+      const latest = response.conversations[0]
+      if (!latest) { setSessionStatus('new'); return }
+      const conversation = await api.conversation(latest.id, controller.signal)
+      if (sessionGenerationRef.current === generation) adoptConversation(conversation)
+    }).catch((reason) => {
+      if ((reason as Error).name === 'AbortError' || sessionGenerationRef.current !== generation) return
+      setSessionStatus('error')
+      setError('Saved conversations could not be loaded. New turns will not be sent until storage is available.')
+    }).finally(() => {
+      if (sessionGenerationRef.current === generation) {
+        markSessionBusy(false)
+        if (sessionAbortRef.current === controller) sessionAbortRef.current = null
+      }
+    })
+    return () => controller.abort()
+  }, [adoptConversation, markSessionBusy])
+  useEffect(() => {
+    if (!deleteArmedId) return
+    const timer = window.setTimeout(() => setDeleteArmedId(''), 6000)
+    return () => window.clearTimeout(timer)
+  }, [deleteArmedId])
   useEffect(() => () => {
     invalidateRequest(requestLifecycleRef.current)
+    sessionGenerationRef.current += 1
     fileReadGenerationRef.current += 1
     abortRef.current?.abort()
+    sessionAbortRef.current?.abort()
   }, [])
 
+  const persistMessages = useCallback(async (
+    nextMessages: ChatMessage[],
+    selectedModel: string,
+    selectedMode: ChatMode,
+  ): Promise<ConversationFull> => {
+    setSessionStatus('saving')
+    const payloadMessages = storedMessages(nextMessages)
+    const currentId = conversationIdRef.current
+    const currentRevision = conversationRevisionRef.current
+    try {
+      let saved: ConversationFull
+      try {
+        saved = currentId
+          ? await api.updateConversation(currentId, {
+              expected_revision: currentRevision ?? 1,
+              model: selectedModel,
+              mode: selectedMode,
+              messages: payloadMessages,
+            })
+          : await api.createConversation({
+              title: deriveConversationTitle(nextMessages),
+              model: selectedModel,
+              mode: selectedMode,
+              messages: payloadMessages,
+            })
+      } catch (reason) {
+        if (!(reason instanceof ApiError) || reason.status !== 409 || !currentId) throw reason
+        saved = await api.createConversation({
+          title: `${deriveConversationTitle(nextMessages)} · continued copy`,
+          model: selectedModel,
+          mode: selectedMode,
+          messages: payloadMessages,
+        })
+        setError('Another tab changed the original chat, so this turn continued in a new saved copy.')
+      }
+      if (!currentId || saved.id !== currentId) {
+        conversationIdRef.current = saved.id
+        setConversationId(saved.id)
+        setConversationTitle(saved.title)
+        setTitleDraft(saved.title)
+      }
+      conversationRevisionRef.current = saved.revision
+      persistedTranscriptRef.current = restoredMessages(saved.messages)
+      setSummary(saved.summary)
+      setSummarizedMessageCount(saved.summarized_message_count)
+      setSummaryMethod(saved.summary_method)
+      updateConversationList(saved)
+      setSessionStatus('saved')
+      return saved
+    } catch (reason) {
+      setSessionStatus('error')
+      throw reason
+    }
+  }, [updateConversationList])
+
+  const compactCurrent = useCallback(async (automatic = false, selectedModel?: string) => {
+    const currentId = conversationIdRef.current
+    if (!currentId || compactionRef.current || capabilityBusy) return
+    compactionRef.current = true
+    setSessionStatus('compacting')
+    try {
+      const result = await api.compactConversation(
+        currentId,
+        selectedModel ?? activeModel ?? model,
+        CONTEXT_RECENT_MESSAGES,
+      )
+      if (conversationIdRef.current !== currentId) return
+      setSummary(result.conversation.summary)
+      conversationRevisionRef.current = result.conversation.revision
+      setSummarizedMessageCount(result.conversation.summarized_message_count)
+      setSummaryMethod(result.summary_method)
+      updateConversationList(result.conversation)
+      setSessionStatus('saved')
+    } catch (reason) {
+      if (!automatic) {
+        setError(reason instanceof Error ? reason.message : 'Context memory could not be compacted.')
+      }
+      setSessionStatus(automatic ? 'saved' : 'error')
+    } finally {
+      compactionRef.current = false
+    }
+  }, [activeModel, capabilityBusy, model, updateConversationList])
+
+  const resetConversationState = useCallback(() => {
+    forceTranscriptScrollRef.current = true
+    followTranscriptRef.current = true
+    sessionGenerationRef.current += 1
+    sessionAbortRef.current?.abort()
+    sessionAbortRef.current = null
+    conversationIdRef.current = null
+    conversationRevisionRef.current = null
+    persistedTranscriptRef.current = []
+    setConversationId(null)
+    setConversationTitle('New conversation')
+    setTitleDraft('New conversation')
+    setMessages([])
+    setSummary('')
+    setSummarizedMessageCount(0)
+    setSummaryMethod(null)
+    setMode('auto')
+    setImage(undefined)
+    setInput('')
+    setError('')
+    setRenaming(false)
+    setDeleteArmedId('')
+    setSessionStatus('new')
+    if (typeof window !== 'undefined' && window.innerWidth <= 900) setHistoryOpen(false)
+  }, [])
+
+  const startNewConversation = useCallback(() => {
+    if (busy || capabilityBusy || sessionBusyRef.current || compactionRef.current) return
+    resetConversationState()
+    window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+  }, [busy, capabilityBusy, resetConversationState])
+
+  const openConversation = useCallback(async (id: string) => {
+    if (busy || capabilityBusy || sessionBusyRef.current) return
+    const generation = ++sessionGenerationRef.current
+    const controller = new AbortController()
+    sessionAbortRef.current?.abort()
+    sessionAbortRef.current = controller
+    markSessionBusy(true)
+    setSessionStatus('loading')
+    setError('')
+    try {
+      const conversation = await api.conversation(id, controller.signal)
+      if (sessionGenerationRef.current !== generation) return
+      adoptConversation(conversation)
+      if (typeof window !== 'undefined' && window.innerWidth <= 900) {
+        setHistoryOpen(false)
+        window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+      }
+    } catch (reason) {
+      if ((reason as Error).name !== 'AbortError' && sessionGenerationRef.current === generation) {
+        setSessionStatus('error')
+        setError(reason instanceof Error ? reason.message : 'This conversation could not be opened.')
+      }
+    } finally {
+      if (sessionGenerationRef.current === generation) {
+        markSessionBusy(false)
+        if (sessionAbortRef.current === controller) sessionAbortRef.current = null
+      }
+    }
+  }, [adoptConversation, busy, capabilityBusy, markSessionBusy])
+
+  const deleteConversation = useCallback(async (id: string, listedRevision: number) => {
+    if (busy || capabilityBusy || sessionBusyRef.current || compactionRef.current) return
+    if (deleteArmedId !== id) { setDeleteArmedId(id); return }
+    markSessionBusy(true)
+    setError('')
+    try {
+      const expectedRevision = conversationIdRef.current === id
+        ? conversationRevisionRef.current ?? listedRevision
+        : listedRevision
+      const result = await deleteWithConflictReload(
+        expectedRevision,
+        (revision) => api.deleteConversation(id, revision),
+        () => api.conversation(id),
+        (reason) => reason instanceof ApiError && reason.status === 409,
+      )
+      if (!result.deleted) {
+        if (conversationIdRef.current === id) {
+          adoptConversation(result.latest, { preserveComposer: true })
+        } else {
+          updateConversationList(result.latest)
+        }
+        setDeleteArmedId('')
+        setError('This chat changed in another tab, so it was not deleted. The latest version is loaded; review it and confirm again if you still want to delete it.')
+        return
+      }
+      setConversations((current) => current.filter((conversation) => conversation.id !== id))
+      setDeleteArmedId('')
+      // Deletion itself owns the session-busy lane. Use the unguarded reset after
+      // the server confirms deletion so an active chat cannot remain selected as
+      // a now-nonexistent record.
+      if (conversationIdRef.current === id) resetConversationState()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The conversation could not be deleted.')
+    } finally {
+      markSessionBusy(false)
+    }
+  }, [adoptConversation, busy, capabilityBusy, deleteArmedId, markSessionBusy, resetConversationState, updateConversationList])
+
+  const saveTitle = useCallback(async () => {
+    const currentId = conversationIdRef.current
+    const title = titleDraft.replace(/\s+/g, ' ').trim()
+    if (!currentId || !title || busy || capabilityBusy || sessionBusyRef.current || compactionRef.current) return
+    markSessionBusy(true)
+    setError('')
+    try {
+      const result = await saveWithRevisionRetry(
+        conversationRevisionRef.current ?? 1,
+        (expectedRevision) => api.updateConversation(currentId, {
+          expected_revision: expectedRevision,
+          title,
+        }),
+        () => api.conversation(currentId),
+        (reason) => reason instanceof ApiError && reason.status === 409,
+      )
+      const saved = result.value
+      if (conversationIdRef.current !== currentId) return
+      if (result.recovered) {
+        // The retry patches only the title, so adopting its response preserves all
+        // transcript changes made by the other tab while completing this rename.
+        adoptConversation(saved, { preserveComposer: true })
+        setError('Another tab changed this chat. Its latest transcript was reloaded before the title was saved.')
+      } else {
+        conversationRevisionRef.current = saved.revision
+        setConversationTitle(saved.title)
+        setTitleDraft(saved.title)
+        setRenaming(false)
+        setSessionStatus('saved')
+        updateConversationList(saved)
+      }
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) {
+        try {
+          const latest = await api.conversation(currentId)
+          if (conversationIdRef.current === currentId) {
+            adoptConversation(latest, { preserveComposer: true })
+            setTitleDraft(title)
+            setRenaming(true)
+            setError('This chat changed again while saving. The latest version is loaded and your title is kept for a retry.')
+          }
+        } catch {
+          setSessionStatus('error')
+          setError('This chat changed in another tab and the latest version could not be reloaded.')
+        }
+      } else {
+        setSessionStatus('error')
+        setError(reason instanceof Error ? reason.message : 'The title could not be saved.')
+      }
+    } finally {
+      markSessionBusy(false)
+    }
+  }, [adoptConversation, busy, capabilityBusy, markSessionBusy, titleDraft, updateConversationList])
+
   const send = useCallback(async () => {
-    const text = input.trim()
-    if ((!text && !image) || !activeModel) return
+    const draft = input
+    const attachment = image
+    const text = draft.trim()
+    if ((!text && !image) || !activeModel || capabilityBusy || sessionBusyRef.current || compactionRef.current) return
+    const validation = chatInputError(draft)
+    if (validation) {
+      setError(validation)
+      window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+      return
+    }
     const generation = beginRequest(requestLifecycleRef.current)
     if (generation === null) return
     const user: ChatMessage = { id: uid(), role: 'user', content: text || 'Describe this image.', image, mode }
     const assistantId = uid()
     const next = [...messages, user]
-    const initialActivity = mode === 'local' ? ['Sending this turn to the local model'] : ['Preparing an independent evidence search']
-    setMessages([...next, {
+    const initialActivity = mode === 'local'
+      ? ['Loading this saved session into the local model']
+      : mode === 'auto'
+        ? ['Selecting the smallest useful capability route']
+        : ['Planning a focused evidence search']
+    const assistantDraft: ChatMessage = {
       id: assistantId,
       role: 'assistant',
       content: '',
@@ -403,93 +938,142 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       model: activeModel,
       mode,
       activity: initialActivity,
-    }])
+    }
+    forceTranscriptScrollRef.current = true
+    followTranscriptRef.current = true
+    setMessages([...next, assistantDraft])
     setInput('')
     setImage(undefined)
     setBusy(true)
     setError('')
     const controller = new AbortController()
     abortRef.current = controller
+    let renderTimer: number | null = null
+    const renderAssistant = () => {
+      renderTimer = null
+      setMessages((current) => current.map((message) => message.id === assistantId ? { ...assistantDraft } : message))
+    }
+    const scheduleAssistantRender = () => {
+      if (renderTimer === null) renderTimer = window.setTimeout(renderAssistant, 40)
+    }
+    const flushAssistantRender = () => {
+      if (renderTimer !== null) {
+        window.clearTimeout(renderTimer)
+        renderTimer = null
+      }
+      renderAssistant()
+    }
+    let sessionReady = false
     try {
-      await streamAgentChat(next, activeModel, mode, {
+      const initialSave = await persistDraftBeforeInference(
+        {
+          messages: persistedTranscriptRef.current,
+          draft,
+          attachment,
+        },
+        () => persistMessages(next, activeModel, mode),
+      )
+      if (!initialSave.ok) {
+        if (isCurrentRequest(requestLifecycleRef.current, generation)) {
+          forceTranscriptScrollRef.current = true
+          followTranscriptRef.current = true
+          setMessages(initialSave.rollback.messages)
+          setInput(initialSave.rollback.draft)
+          setImage(initialSave.rollback.attachment)
+          setSessionStatus(conversationIdRef.current ? 'saved' : 'new')
+          const failure = initialSave.reason instanceof Error
+            ? initialSave.reason.message
+            : 'This turn could not be saved.'
+          setError(`${failure} Nothing was added to the chat; your exact draft${initialSave.rollback.attachment ? ' and attachment were' : ' was'} restored.`)
+          window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+        }
+        return
+      }
+      const savedBefore = initialSave.saved
+      sessionReady = true
+      const contextMessages = inferenceContext(
+        next,
+        savedBefore.summary,
+        savedBefore.summarized_message_count,
+      )
+      await streamAgentChat(contextMessages, activeModel, mode, {
         onStatus: (event) => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) => {
-            if (message.id !== assistantId) return message
-            const activity = [...(message.activity ?? [])]
-            if (!activity.includes(event.message)) activity.push(event.message)
-            return { ...message, activity, model: event.model ?? message.model }
-          }))
+          const activity = [...(assistantDraft.activity ?? [])]
+          if (!activity.includes(event.message)) activity.push(event.message)
+          assistantDraft.activity = activity
+          assistantDraft.model = event.model ?? assistantDraft.model
+          setMessages((current) => current.map((message) => message.id === assistantId ? { ...assistantDraft } : message))
         },
         onSource: (source) => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) => message.id === assistantId ? {
-            ...message,
-            sources: [...(message.sources ?? []).filter((item) => item.url !== source.url), source],
-          } : message))
+          assistantDraft.sources = [...(assistantDraft.sources ?? []).filter((item) => item.url !== source.url), source]
+          setMessages((current) => current.map((message) => message.id === assistantId ? { ...assistantDraft } : message))
         },
         onWarning: (warning) => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) => message.id === assistantId ? {
-            ...message,
-            warning: [message.warning, warning].filter(Boolean).join(' '),
-          } : message))
+          assistantDraft.warning = [assistantDraft.warning, warning].filter(Boolean).join(' ')
+          setMessages((current) => current.map((message) => message.id === assistantId ? { ...assistantDraft } : message))
         },
         onReasoning: () => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) => message.id === assistantId ? {
-            ...message,
-            activity: [...(message.activity ?? []).filter((item) => item !== 'Reasoning locally'), 'Reasoning locally'],
-          } : message))
+          assistantDraft.activity = [...(assistantDraft.activity ?? []).filter((item) => item !== 'Reasoning locally'), 'Reasoning locally']
+          setMessages((current) => current.map((message) => message.id === assistantId ? { ...assistantDraft } : message))
         },
         onToken: (token) => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) =>
-            message.id === assistantId ? { ...message, content: message.content + token, pending: false } : message,
-          ))
+          assistantDraft.content += token
+          scheduleAssistantRender()
         },
         onDone: (event) => {
           if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
-          setMessages((current) => current.map((message) => message.id === assistantId ? {
-            ...message,
-            model: event.model,
-            sources: event.sources.length ? event.sources : message.sources,
-            warning: event.warnings.length ? event.warnings.join(' ') : message.warning,
-            pending: false,
-          } : message))
+          assistantDraft.model = event.model
+          assistantDraft.sources = event.sources.length ? event.sources : assistantDraft.sources
+          assistantDraft.warning = event.warnings.length ? event.warnings.join(' ') : assistantDraft.warning
+          assistantDraft.pending = false
+          flushAssistantRender()
         },
       }, controller.signal)
     } catch (reason) {
-      if (isCurrentRequest(requestLifecycleRef.current, generation) && (reason as Error).name !== 'AbortError') {
-        const message = reason instanceof Error ? reason.message : 'The local model could not respond.'
-        setError(message)
-        setMessages((current) => current.map((item) => item.id === assistantId ? {
-          ...item,
-          content: item.content || `I could not complete this turn. ${message}`,
-          warning: message,
-          pending: false,
-        } : item))
+      if (isCurrentRequest(requestLifecycleRef.current, generation)) {
+        const aborted = (reason as Error).name === 'AbortError'
+        const message = aborted
+          ? 'Response stopped. This partial turn was kept so you can continue.'
+          : reason instanceof Error ? reason.message : 'The local model could not respond.'
+        if (!aborted) setError(message)
+        assistantDraft.content ||= aborted
+          ? 'Response stopped before more text was generated.'
+          : `I could not complete this turn. ${message}`
+        assistantDraft.warning = [assistantDraft.warning, message].filter(Boolean).join(' ')
+        assistantDraft.pending = false
       }
     } finally {
+      if (renderTimer !== null) window.clearTimeout(renderTimer)
+      if (isCurrentRequest(requestLifecycleRef.current, generation)) {
+        assistantDraft.pending = false
+        delete assistantDraft.activity
+        if (sessionReady) {
+          const finalized = [...next, { ...assistantDraft }]
+          setMessages(finalized)
+          try {
+            const saved = await persistMessages(finalized, assistantDraft.model ?? activeModel, mode)
+            if (shouldAutoCompact(saved.message_count, saved.summarized_message_count)) {
+              void compactCurrent(true, assistantDraft.model ?? activeModel)
+            }
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'The response could not be saved.')
+          }
+        }
+      }
       if (finishRequest(requestLifecycleRef.current, generation)) {
         setBusy(false)
         if (abortRef.current === controller) abortRef.current = null
-        setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, pending: false } : message))
       }
     }
-  }, [activeModel, image, input, messages, mode])
-
-  const clearThread = () => {
-    invalidateRequest(requestLifecycleRef.current)
-    fileReadGenerationRef.current += 1
-    abortRef.current?.abort()
-    abortRef.current = null
-    setBusy(false)
-    setMessages([])
-    setError('')
-  }
+  }, [activeModel, capabilityBusy, compactCurrent, image, input, messages, mode, persistMessages])
 
   const attach = async (file?: File) => {
+    if (capabilityBusy || sessionBusyRef.current || compactionRef.current) return
     const validation = imageFileError(file)
     if (validation) { setError(validation); return }
     const fileReadGeneration = ++fileReadGenerationRef.current
@@ -503,64 +1087,202 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     }
   }
 
+  const appendAgentResult = useCallback((markdown: string) => {
+    const task = input.trim()
+    if (!task || busy || sessionBusyRef.current || compactionRef.current || imageGenerationBusy) {
+      setError('Finish the current chat or image operation before adding an Agent result.')
+      return
+    }
+    const user: ChatMessage = { id: uid(), role: 'user', content: task, image, mode }
+    const assistant: ChatMessage = {
+      id: uid(),
+      role: 'assistant',
+      content: markdown,
+      model: 'agent-python-sandbox',
+      mode,
+    }
+    const next = [...messages, user, assistant]
+    forceTranscriptScrollRef.current = true
+    followTranscriptRef.current = true
+    setMessages(next)
+    setInput('Explain the isolated result and continue this task.')
+    setImage(undefined)
+    setError('')
+    // Let AgentPanel finish its own request lane before the session write makes
+    // the panel externally disabled. This preserves deterministic cleanup.
+    void (async () => {
+      await Promise.resolve()
+      markSessionBusy(true)
+      try {
+        await persistMessages(next, activeModel || model, mode)
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : 'The Agent result could not be saved.')
+      } finally {
+        markSessionBusy(false)
+      }
+    })()
+  }, [activeModel, busy, image, imageGenerationBusy, input, markSessionBusy, messages, mode, model, persistMessages])
+
+  const useGeneratedImage = useCallback(async (blob: Blob, prompt: string) => {
+    if (busy || sessionBusyRef.current || compactionRef.current || agentBusy) {
+      setError('Finish the current chat or Agent operation before attaching this image.')
+      return
+    }
+    markSessionBusy(true)
+    setError('')
+    try {
+      const extension = blob.type === 'image/jpeg' ? 'jpg' : 'png'
+      const generated = new File([blob], `localllm-generated.${extension}`, { type: blob.type })
+      const validation = imageFileError(generated)
+      if (validation) throw new Error(`${validation} Download it from Image Studio instead.`)
+      const dataUrl = await fileToDataUrl(generated)
+      setImage(dataUrl)
+      setInput(prompt
+        ? `Continue working with this locally generated image. Original prompt: ${prompt}`
+        : 'Continue working with this locally generated image.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The generated image could not be attached.')
+    } finally {
+      markSessionBusy(false)
+    }
+  }, [agentBusy, busy, markSessionBusy])
+
+  const sessionStatusLabel = sessionStatus === 'loading' ? 'Loading chats'
+    : sessionStatus === 'saving' ? 'Saving to SQLite'
+      : sessionStatus === 'compacting' ? 'Updating context memory'
+        : sessionStatus === 'error' ? 'Storage needs attention'
+          : sessionStatus === 'new' ? 'New unsaved chat'
+            : 'Saved in SQLite'
+
   return (
-    <section className="chat-view">
-      {messages.length === 0 ? (
-        <div className="chat-empty">
+    <section className={`chat-view ${historyOpen ? 'has-history' : ''}`}>
+      <button ref={historyToggleRef} className="chat-history-toggle" data-testid="chat-history-toggle" onClick={toggleHistory} aria-expanded={historyOpen} aria-controls="chat-history-panel" aria-label={historyOpen ? 'Close saved conversations' : 'Open saved conversations'}>
+        <History size={15} /><span>Chats</span>
+      </button>
+      {historyOpen && (
+        <>
+        <button className="chat-history-scrim" aria-label="Close conversation history" onClick={() => closeHistory()} />
+        <aside ref={historyPanelRef} id="chat-history-panel" className="chat-history-panel" data-testid="chat-history-panel" aria-label="Saved conversations">
+          <div className="chat-history-header">
+            <div><span>LOCAL SESSIONS</span><strong>Your conversations</strong></div>
+            <button ref={historyCloseRef} onClick={() => closeHistory()} aria-label="Close conversation history"><X size={15} /></button>
+          </div>
+          <button className="new-chat-button" data-testid="new-conversation" onClick={startNewConversation} disabled={busy || sessionBusy || capabilityBusy}>
+            <MessageSquarePlus size={16} /> New chat
+          </button>
+          <div className="chat-history-list" role="list" aria-label="Saved conversations">
+            {sessionStatus === 'loading' && conversations.length === 0 && <div className="chat-history-empty"><LoaderCircle className="spin" size={17} />Loading local sessions…</div>}
+            {sessionStatus !== 'loading' && conversations.length === 0 && <div className="chat-history-empty"><MessageCircleMore size={19} /><strong>No saved chats yet</strong><span>Your first message creates one.</span></div>}
+            {conversations.map((conversation) => (
+              <div key={conversation.id} role="listitem" className={`chat-history-item ${conversation.id === conversationId ? 'is-active' : ''}`}>
+                <button className="chat-history-open" data-testid={`conversation-${conversation.id}`} onClick={() => void openConversation(conversation.id)} disabled={busy || sessionBusy || capabilityBusy} aria-current={conversation.id === conversationId ? 'true' : undefined} aria-label={`Open ${conversation.title}, ${conversation.message_count} messages, ${formatConversationTime(conversation.updated_at)}`}>
+                  <strong>{conversation.title}</strong>
+                  <span>{conversation.message_count} messages · {formatConversationTime(conversation.updated_at)}</span>
+                  <small>{conversation.has_summary ? `${conversation.summarized_message_count} in context memory` : CHAT_MODES.find((item) => item.id === conversation.mode)?.label}</small>
+                </button>
+                <button className={`chat-history-delete ${deleteArmedId === conversation.id ? 'is-armed' : ''}`} onClick={() => void deleteConversation(conversation.id, conversation.revision)} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} aria-label={deleteArmedId === conversation.id ? `Confirm deletion of ${conversation.title}` : `Delete ${conversation.title}`}>
+                  {deleteArmedId === conversation.id ? 'Confirm' : <Trash2 size={13} />}
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="chat-history-footer"><Database size={14} /><span><strong>SQLite session store</strong><small>Full transcripts remain local and resumable.</small></span></div>
+        </aside>
+        </>
+      )}
+
+      <div ref={transcriptRef} className="chat-transcript" data-testid="chat-transcript" aria-label="Conversation transcript" tabIndex={0} onScroll={(event) => {
+        followTranscriptRef.current = isTranscriptNearBottom(event.currentTarget)
+      }}>
+        {messages.length === 0 ? (
+          <div className="chat-empty">
           <div className="hero-orbit"><div className="orbit-core"><BrainCircuit size={31} /></div><span /><span /><span /></div>
-          <HeroTitle eyebrow="LOCAL INTELLIGENCE, YOUR RULES" title="Think locally." accent="Build freely." copy="One private workspace for language, code, images, research, and the strange little experiments you have been meaning to try." />
+          <HeroTitle eyebrow="LOCAL INTELLIGENCE, YOUR RULES" title="Think locally." accent="Continue anytime." copy="Start a private session, add web or paper evidence when useful, and return to the complete conversation later." />
           <div className="prompt-grid">
             {PROMPTS.map((prompt) => {
               const Icon = prompt.icon
-              return <button key={prompt.title} onClick={() => setInput(prompt.text)}><Icon size={19} /><strong>{prompt.title}</strong><span>{prompt.text}</span><ArrowRight size={16} /></button>
+              return <button key={prompt.title} onClick={() => {
+                setInput(prompt.text)
+                window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+              }}><Icon size={19} /><strong>{prompt.title}</strong><span>{prompt.text}</span><ArrowRight size={16} /></button>
             })}
           </div>
           <ProviderStatusStrip status={searchStatus} />
-        </div>
-      ) : (
-        <div className="conversation">
-          <div className="conversation-title">
-            <div><span className="eyebrow"><i />{threadLabel}</span><h2>Untitled experiment</h2></div>
-            <button className="icon-text-button" onClick={clearThread}><Trash2 size={14} /> Clear thread</button>
           </div>
-          {messages.map((message) => (
-            <article key={message.id} className={`message ${message.role}`} data-testid={`chat-message-${message.role}`} data-status={message.pending ? 'running' : 'complete'}>
-              <div className="avatar">{message.role === 'user' ? 'YOU' : <Sparkles size={16} />}</div>
-              <div className="message-body">
-                <span className="message-author">{message.role === 'user' ? 'You' : 'LocalLLM'}<small>{message.role === 'assistant' ? message.model ?? model : 'just now'}</small>{message.mode && <i>{CHAT_MODES.find((item) => item.id === message.mode)?.shortLabel}</i>}</span>
-                {message.image && <img src={message.image} alt="User attachment" />}
-                {message.activity && message.pending && <div className="agent-activity" role="status" aria-live="polite">{message.activity.map((item, index) => <span key={item} className={index === message.activity!.length - 1 ? 'is-current' : ''}>{index === message.activity!.length - 1 ? <LoaderCircle className="spin" size={12} /> : <Check size={12} />}{item}</span>)}</div>}
-                {message.pending && !message.content ? <div className="typing" aria-label="Local model is responding"><i /><i /><i /></div> : <SafeModelMarkdown>{message.content}</SafeModelMarkdown>}
-                {message.warning && <div className="message-warning"><Activity size={13} />{message.warning}</div>}
-                {message.sources && <SourceCards sources={message.sources} compact />}
-              </div>
-            </article>
-          ))}
+        ) : (
+          <div className="conversation" data-testid="active-conversation" data-conversation-id={conversationId ?? 'new'}>
+          <div className="conversation-title">
+            <div>
+              <span className="eyebrow"><i />{threadLabel}</span>
+              {renaming ? (
+                <div className="conversation-title-editor">
+                  <input aria-label="Conversation title" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} maxLength={120} autoFocus onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.nativeEvent.isComposing) void saveTitle()
+                    if (event.key === 'Escape') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      setTitleDraft(conversationTitle)
+                      setRenaming(false)
+                    }
+                  }} />
+                  <button onClick={() => void saveTitle()} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} aria-label="Save conversation title"><Check size={15} /></button>
+                  <button onClick={() => { setTitleDraft(conversationTitle); setRenaming(false) }} aria-label="Cancel title edit"><X size={15} /></button>
+                </div>
+              ) : <div className="conversation-heading-line"><h2>{conversationTitle}</h2>{conversationId && <button onClick={() => { setTitleDraft(conversationTitle); setRenaming(true) }} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} aria-label="Rename conversation"><Pencil size={13} /></button>}</div>}
+            </div>
+            <div className="conversation-actions">
+              <span className={`session-save-state is-${sessionStatus}`} role="status" aria-live="polite"><Database size={12} />{sessionStatusLabel}</span>
+              <button className="icon-text-button" onClick={() => void compactCurrent(false)} disabled={busy || sessionBusy || capabilityBusy || !conversationId || messages.length <= CONTEXT_RECENT_MESSAGES || sessionStatus === 'compacting'} aria-label={sessionStatus === 'compacting' ? 'Updating context memory' : 'Compact older messages into context memory'}><Sparkles size={14} /> {sessionStatus === 'compacting' ? 'Remembering…' : 'Compact context'}</button>
+              <button className="icon-text-button" onClick={startNewConversation} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'}><MessageSquarePlus size={14} /> New chat</button>
+            </div>
+          </div>
+          {summary && <details className="context-memory"><summary><BrainCircuit size={14} />Context memory · {summarizedMessageCount} older messages · {summaryMethod ?? 'local'} summary</summary><p>{summary}</p></details>}
+          {messages.map((message) => <ChatMessageBubble key={message.id} message={message} fallbackModel={model} />)}
           <div ref={endRef} />
-        </div>
-      )}
+          </div>
+        )}
+      </div>
       <div className="composer-wrap">
-        {error && <div className="inline-error"><Activity size={15} />{error}</div>}
-        {image && <div className="attachment-preview"><img src={image} alt="Ready to send" /><span>Image ready · vision routing enabled</span><button onClick={() => setImage(undefined)} aria-label="Remove attached image"><X size={15} /></button></div>}
-        <div className="composer">
-          <div className="composer-mode-row"><span>EVIDENCE</span><ChatModePicker mode={mode} onChange={setMode} disabled={busy} /><small>{CHAT_MODES.find((item) => item.id === mode)?.description}</small></div>
-          <textarea data-testid="chat-input" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
-          }} placeholder="Ask, create, compare, or explore…" rows={1} />
+        {error && <div className="inline-error" role="alert"><Activity size={15} />{error}</div>}
+        {image && <div className="attachment-preview" role="status"><img src={image} alt="Ready to send" /><span>Image ready · vision routing enabled</span><button onClick={() => setImage(undefined)} aria-label="Remove attached image"><X size={15} /></button></div>}
+        <div className="capability-dock" aria-label="Optional local capabilities">
+          <AgentPanel
+            goal={input}
+            model={activeModel || model}
+            hasImage={Boolean(image)}
+            disabled={busy || sessionBusy || imageGenerationBusy || sessionStatus === 'compacting'}
+            onBusyChange={setAgentBusy}
+            onAppendResult={appendAgentResult}
+          />
+          <ImageGenerationPanel
+            disabled={busy || sessionBusy || agentBusy || sessionStatus === 'compacting'}
+            onBusyChange={setImageGenerationBusy}
+            onUseResult={(blob, prompt) => useGeneratedImage(blob, prompt)}
+          />
+        </div>
+        <div className="composer" role="group" aria-label="Chat composer">
+          <div className="composer-mode-row"><span>ANSWER WITH</span><ChatModePicker mode={mode} onChange={setMode} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} /><small>{CHAT_MODES.find((item) => item.id === mode)?.description}</small></div>
+          <textarea ref={composerTextareaRef} data-testid="chat-input" aria-label="Message LocalLLM" aria-describedby="composer-privacy-note" value={input} maxLength={MAX_CHAT_INPUT_CHARS} disabled={sessionBusy || capabilityBusy || sessionStatus === 'compacting'} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() }
+          }} placeholder="Message LocalLLM…" rows={1} />
           <div className="composer-actions">
             <div className="composer-left">
-              {hasImageContext ? <ModelSelect model={visionModel} setModel={setVisionModel} catalog={catalog} kind="vision" testId="chat-vision-model-select" /> : <ModelSelect model={model} setModel={setModel} catalog={catalog} />}
+              {hasImageContext
+                ? <ModelSelect model={visionModel} setModel={setVisionModel} catalog={catalog} kind="vision" testId="chat-vision-model-select" disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} />
+                : <ModelSelect model={model} setModel={setModel} catalog={catalog} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} />}
               <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const inputElement = event.currentTarget; void attach(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
-              <button className="tool-button" onClick={() => fileRef.current?.click()} aria-label="Attach an image"><Paperclip size={16} /><span>Image</span></button>
+              <button className="tool-button" onClick={() => fileRef.current?.click()} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} aria-label="Attach an image"><Paperclip size={16} /><span>Image</span></button>
             </div>
-            {busy ? <button aria-label="Stop response" data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button aria-label="Send message" data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !image) || !activeModel}><Send size={18} /></button>}
+            {busy ? <button aria-label="Stop response" data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button aria-label="Send message" data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !image) || !activeModel || sessionBusy || capabilityBusy || ['loading', 'compacting'].includes(sessionStatus)}><Send size={18} /></button>}
           </div>
         </div>
         {!activeModel
           ? <ModelGateNote catalog={catalog} kind={hasImageContext ? 'vision' : 'text'} />
-          : <p className="composer-note"><ShieldCheck size={13} /> {mode === 'local'
-            ? 'Inference stays local; this turn makes no search request.'
-            : 'Inference stays local; retrieval sends queries and configured provider credentials to external services and may fetch public pages.'} Verify important outputs.</p>}
+          : <p id="composer-privacy-note" className="composer-note"><Database size={13} /> {sessionStatusLabel}. <ShieldCheck size={13} /> {mode === 'local'
+            ? 'Local mode makes no search request.'
+            : mode === 'auto'
+              ? 'Auto stays local unless the request explicitly needs fresh or scholarly evidence.'
+              : 'This mode plans retrieval across configured external providers before local inference.'}</p>}
       </div>
     </section>
   )
@@ -1357,7 +2079,7 @@ function App() {
       <Sidebar view={view} setView={setView} open={mobileNav} setOpen={setMobileNav} />
       <main className="main-shell">
         <AppHeader status={status} onRefresh={refreshStatus} />
-        <div className="workspace-view" data-testid="view-chat-panel" hidden={view !== 'chat'}><ChatView catalog={catalog} /></div>
+        <div className="workspace-view workspace-view--chat" data-testid="view-chat-panel" hidden={view !== 'chat'}><ChatView catalog={catalog} /></div>
         <div className="workspace-view" data-testid="view-vision-panel" hidden={view !== 'vision'}><VisionView catalog={catalog} /></div>
         <div className="workspace-view" data-testid="view-research-panel" hidden={view !== 'research'}><ResearchView catalog={catalog} /></div>
         <div className="workspace-view" data-testid="view-models-panel" hidden={view !== 'models'}><ModelsView catalog={catalog} refresh={refreshCatalog} /></div>

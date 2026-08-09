@@ -41,8 +41,12 @@ curl -fsS http://127.0.0.1:11434/api/tags | python3 -m json.tool
 | `qwen3-vl:30b-a3b-instruct-q4_K_M` | 20 GB | 256K | one 4090 at modest context; two as cache/vision load grows |
 | `bge-m3:latest` | 1.2 GB | 8K | CPU or one GPU; 1024-dimensional embeddings |
 
-The complete set is approximately 109.2 GB before filesystem overhead. The
-`core` set—8B Q4, 30B Q4, VL 8B Q4, and BGE-M3—is approximately 31.5 GB.
+The complete `all` profile is ten raw Ollama tags—six text, three vision
+including the 30B-A3B Vision XL Q4 tag, and one embedding model—and is
+approximately 109.2 GB before filesystem overhead. All ten were installed on
+the validated dual-4090 host recorded in the
+[post-reboot verification addendum](verification-report.md#gpu-and-expanded-api-inventory).
+The `core` set—8B Q4, 30B Q4, VL 8B Q4, and BGE-M3—is approximately 31.5 GB.
 
 ## Context is not free
 

@@ -8,7 +8,7 @@
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-685bc7?style=flat-square)](references/openai-api-compatibility.md)
 [![Local-first](https://img.shields.io/badge/privacy-local--first-2aa98e?style=flat-square)](#privacy-and-safety)
 
-LocalLLM Studio turns a capable Linux workstation into a coherent local AI system. It pairs a polished responsive web app with Ollama, explicit Qwen model presets, a local OpenAI-compatible gateway, a bounded cited web-research pipeline, and a Ghidra/MCP reverse-engineering workspace.
+LocalLLM Studio turns a capable Linux workstation into a coherent local AI system. It pairs a polished responsive web app with Ollama, explicit Qwen model presets, resumable SQLite conversations, a local OpenAI-compatible gateway, bounded cited web research, optional confirmed Python and image-generation lanes, and a Ghidra/MCP reverse-engineering workspace.
 
 The application is useful before every model is downloaded: system diagnostics, model pulls, the built-in API Desk, and bounded static binary inspection remain available independently.
 
@@ -16,10 +16,10 @@ The application is useful before every model is downloaded: system diagnostics, 
 
 | Workspace | Purpose |
 | --- | --- |
-| Playground | Streaming local chat, selectable web/paper grounding, and optional image attachments |
+| Playground | Resumable streaming chat, local-first Auto routing, image attachments, GFM/KaTeX rendering, and collapsed Agent/Image capability panels |
 | Vision Lab | OCR, screenshot review, diagram reading, and visual question answering |
 | Deep Research | Multi-query web search, page extraction, cited synthesis, and uncertainty tracking |
-| Model Shelf | Curated Q4/Q8 tags, download progress, installed state, and stable aliases |
+| Model Shelf | Ten curated Q4/Q8 text, MoE, vision/Vision XL, and embedding tags with download progress, installed state, and stable aliases |
 | Binary Studio | Static upload triage plus a read-only Ghidra/MCP investigator with mutation tools blocked |
 | API Desk | Copy-ready examples for Chat Completions, Responses, vision inputs, embeddings, and models |
 
@@ -43,8 +43,8 @@ In a second terminal, pull the three practical daily models plus multilingual em
 scripts/pull-models.sh core
 ```
 
-Pull every requested Q4/Q8 comparison model, the 30B-A3B vision model, and
-embeddings (about 109 GB):
+Pull all ten requested Ollama artifacts: every Q4/Q8 comparison model, the
+30B-A3B Vision XL model, and multilingual embeddings (about 109 GB):
 
 ```bash
 scripts/pull-models.sh all
@@ -97,12 +97,30 @@ OpenAI’s Responses API is broader than the locally implemented subset. The exa
 
 ## Grounded chat and research
 
-Chat has four explicit evidence modes: **Local**, **Web**, **Papers**, and
-**All**. Retrieval is orchestrated by the server rather than delegated to
-model tool calling, so the 4B, 8B, and MoE models receive the same normalized
+Chat has five selectable evidence modes: **Auto**, **Local**, **Web**,
+**Papers**, and **All**. Auto is the default, deterministic, local-first route:
+it searches only when the latest user turn explicitly asks for fresh,
+verifiable, web, or scholarly evidence. Local always bypasses search, while the
+three explicit retrieval modes provide a direct override. An unresolved search
+follow-up asks for the missing subject before sending anything externally.
+
+For a search route, a local model proposes one to three strictly bounded passive
+queries; invalid output falls back to deterministic multilingual variants.
+Search itself is orchestrated and bounded by the server rather than delegated
+to model tool calling, so the 4B, 8B, and MoE models receive the same normalized
 evidence for a given broker response. Deep Research adds persistent jobs,
 multiple query angles, page extraction, a strict cited-report dialect, citation
 repair, cancellation, and Quick/Standard/Deep budgets.
+
+Auto treats a pasted URL-shaped token as a Web signal and a DOI as a Papers
+signal, while local paths and dotted source/package/version names are not Web
+signals by themselves.
+Before Chat, direct Quick Search, or Deep Research builds an external query,
+URL/URI credentials, paths, query strings, and fragments are removed; only a
+bounded hostname or authority label can remain. A local planner that reproduces a removed term is
+discarded. DOI identifiers retain their scholarly search meaning. This is an
+outbound-query safeguard: the original Playground turn or Deep Research
+question is still stored locally in its normal history record.
 
 The keyless web fallback combines structured Wikipedia, GitHub repository, and
 Hacker News APIs with explicitly named DDGS engines for DuckDuckGo, Brave,
@@ -114,6 +132,98 @@ leave the machine; model inference remains local. Quick-search JSON is capped
 at 16 KiB, research creation at 32 KiB, and grounded-chat requests at 25 MiB.
 See the [provider and API guide](references/search-research-api.md) for
 configuration, response provenance, bounds, and failure behavior.
+
+## Resumable conversations and rich responses
+
+Playground conversations are created, listed, renamed, reopened, and deleted
+through a project-local SQLite store. Full transcripts—including validated
+local image attachments and source metadata—remain available after a restart.
+Every update and delete uses a monotonic revision compare-and-swap guard. If two
+tabs race, the UI preserves an unsaved branch as a continued copy and refuses a
+stale deletion instead of silently overwriting or removing newer history.
+
+Long conversations are compacted into bounded local context memory while the
+complete transcript remains untouched. The summary is supplied to inference as
+assistant memory, never as a privileged system instruction. The web app keeps
+the familiar user-right/model-left chat layout and renders model output with
+CommonMark, GFM tables/task lists/strikethrough, fenced and inline code, and
+KaTeX for `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`. Model-authored links
+and images remain inert, raw HTML is skipped, and retrieved-source cards are the
+explicit navigation surface.
+
+The Playground composer and preflight enforce the store's 32,000-character
+per-message limit. More generally, if the mandatory pre-inference save fails
+because of validation, message/image quota, archive capacity, or another local
+storage error, no model request starts and the exact draft, attachment, and
+prior transcript are restored. Grounded Chat gracefully caps visible assistant
+text at 30,000 characters, emits a truncation warning, and completes normally so
+the bounded answer and warning can be saved and resumed instead of being lost.
+
+See [conversation history and rendering](references/conversation-history.md)
+for the API, quotas, context window, and renderer trust boundary.
+
+## Optional Agent mode
+
+The collapsed **Agent** panel is mounted in Playground but remains separate
+from ordinary chat. It submits only the current goal to a local model and shows
+a validated, non-executable capability plan. Answer, Web, Papers, and Vision
+steps remain previews; the user handles them through the normal Auto chat path.
+Python is the only executable tool, and it remains unavailable until the
+operator installs the fixed sandbox image and explicitly enables it:
+
+```bash
+scripts/setup-agent-sandbox.sh
+scripts/verify-agent-sandbox.sh
+```
+
+```dotenv
+LOCALLLM_AGENT_CODE_EXECUTION_ENABLED=true
+```
+
+Restart the API after opting in. Every Python run still requires a visible,
+code-hash-bound, short-lived, single-use confirmation followed by an explicit
+**Run** action. The fixed Docker profile has no network or host mounts, a
+read-only root filesystem, a non-root user, dropped capabilities, and bounded
+CPU, memory, runtime, processes, and output. It is containment for trusted local
+operation, not a defense against an unknown Docker/kernel escape. Read
+[Agent capabilities and the Python sandbox](references/agent-capabilities.md)
+before enabling it.
+
+## Optional local image generation
+
+The collapsed **Image Studio** panel and `/api/images/*` routes are mounted but
+disabled by default. The selected image model is the pinned official
+`Tongyi-MAI/Z-Image-Turbo` Diffusers checkpoint, loaded as BF16 on one selected
+physical GPU. Install the isolated runtime, exact weights, and static checks
+without enabling generation:
+
+```bash
+scripts/setup-image-generation.sh
+scripts/download-image-generation-model.sh
+scripts/verify-image-generation.sh
+```
+
+Choose the currently idle physical card rather than assuming Ollama's placement.
+On this dual-4090 workstation, the measured one-card Ollama load is on GPU 1,
+so use physical GPU 0 for image generation, then restart the API:
+
+```dotenv
+LOCALLLM_IMAGE_GENERATION_ENABLED=true
+LOCALLLM_IMAGE_GENERATION_GPU=0
+LOCALLLM_IMAGE_GENERATION_TIMEOUT_SECONDS=300
+```
+
+The UI keeps a restart-safe keyed list of generated results, can cancel, delete,
+or download one through authenticated private blobs, and attaches it to the next
+vision turn only after **Release GPU** has been verified. The worker also
+unloads after 120 idle seconds. First load
+and generation measured a 21,352,528,384-byte PyTorch peak on this host. A
+fail-closed preflight therefore requires at least 22 GiB reported free before a
+cold load, so an Ollama runner already resident on that card must expire or be
+unloaded first. Image and chat work are intentionally serialized in the UI. See
+[optional image generation](references/image-generation.md) for the model size,
+real-smoke command, API key boundary, sandbox/transient-unit launch path,
+quotas, and limitations.
 
 ## Reverse-engineering toolchain
 
@@ -188,6 +298,8 @@ npm run build
 uv run --project apps/api ruff check apps/api/localllm apps/api/tests
 uv run --project apps/api pytest -q
 uv run --project apps/api --extra dev python scripts/verify-openai-api.py
+scripts/verify-agent-sandbox.sh
+scripts/verify-image-generation.sh
 scripts/verify-re-toolchain.sh
 ```
 
@@ -208,17 +320,25 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 ## Privacy and safety
 
 - App, Ollama, noVNC, and MCP examples bind to loopback; the app also rejects non-loopback peers if it is accidentally started on a broader socket.
-- `LOCALLLM_API_KEY` gates only `/v1/*`. The management `/api/*` routes rely on
-  the loopback peer restriction; all browser requests to `/api/*` and `/v1/*`
-  also receive origin/fetch-site checks. Native same-host processes can invoke
-  them. The
+- `LOCALLLM_API_KEY` gates `/v1/*` plus every image job/output route and image
+  mutation; only image status remains loopback-public. Other management
+  `/api/*` routes—including conversations,
+  search, research, and Agent planning/execution—rely on the loopback peer
+  restriction; all browser requests to `/api/*` and `/v1/*` also receive
+  origin/fetch-site checks. Native same-host processes can invoke them. The
   shipped `local-dev-key` is a development placeholder, not a secret; do not
   proxy or tunnel port 8008 without adding authentication and authorization.
 - The optional browser harness is a same-host test fixture, not an authentication boundary: Xvfb disables X access control, x11vnc is passwordless, and Chrome DevTools is unauthenticated. Never forward, proxy, or tunnel ports `5930`, `6130`, or `9470`, and stop the harness after use.
 - Browser API requests enforce an origin/fetch-site boundary, HTTP hosts are allowlisted, and the app emits a restrictive content-security policy plus anti-framing headers.
-- LocalLLM does not persist Playground or Vision Lab threads; their current
-  state remains in browser memory. Research questions/reports and Binary Studio
-  uploads and metadata persist under `data/` until explicitly removed; model
+- Playground threads persist in a private project-local SQLite database and can
+  be resumed or explicitly deleted; model-backed context summaries never remove
+  the full stored messages. Revision compare-and-swap prevents a stale tab from
+  silently overwriting a newer copy. Vision Lab state remains in browser memory.
+  Successful image-generation job metadata and generated files remain under
+  `data/image-generation/` so they can be listed and removed after a restart;
+  prompts are not written there. Completed files count against quota until
+  removed. Research questions/reports and Binary Studio uploads and metadata
+  persist under `data/` until explicitly removed; model
   weights and reverse-engineering projects use ignored project-local
   directories. The research archive refuses new runs at 500 JSON files or
   256 MiB. The inspection archive refuses new uploads at 256 artifact IDs or a
@@ -234,9 +354,24 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
   at 32 KiB.
 - The web app exposes only 12 read-only PyGhidra-MCP tools to its investigator and blocks all eight discovered project/symbol mutation tools.
 - Binary strings and fetched webpages are treated as untrusted data, not model instructions.
+- Model-authored Markdown cannot create active links, remote images, or raw HTML;
+  GFM and KaTeX are rendered through a constrained component surface.
+- Ordinary chat never executes Agent Python. Even after operator opt-in, each
+  exact program needs a fresh confirmation and runs in the fixed offline Docker
+  sandbox. The loopback boundary is not per-user authorization.
+- Image generation is disabled by default and accepts no caller-selected model,
+  path, URL, or upload. Its fresh-root Bubblewrap worker has private PID/network/
+  IPC/UTS/runtime namespaces, no host home/repository/runtime sockets, and only
+  NVIDIA control/UVM plus the selected GPU node. Release the warm worker before
+  a competing LLM load.
 - AI reverse-engineering conclusions are hypotheses until supported by cross-references, captures, tests, or hardware behavior.
-- Web access is explicit: it runs only in Chat's Web/Papers/All modes or in
-  Deep Research. Local chat and Vision Lab do not silently search the internet.
+- Web access runs in Chat's explicit Web/Papers/All modes, when local-first Auto
+  detects an explicit fresh/web/scholarly evidence request, or in Deep Research.
+  A standalone URL-shaped Auto turn routes to Web and a standalone DOI routes to
+  Papers. Outbound Chat and Deep Research query plans remove URL credentials,
+  paths, query strings, and fragments before provider calls; local paths do not
+  themselves trigger Auto search. Local chat and Vision Lab do not silently
+  search the internet.
 
 ## Documentation map
 
@@ -246,6 +381,9 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 - [Pinned llama.cpp CUDA alternative](references/llama-cpp.md)
 - [Deep Research design](references/deep-research.md)
 - [Federated search and research API](references/search-research-api.md)
+- [Local conversation history and context compaction](references/conversation-history.md)
+- [Agent capabilities and confirmed Python sandbox](references/agent-capabilities.md)
+- [Optional Z-Image-Turbo image generation](references/image-generation.md)
 - [Reverse-engineering workflow](references/reverse-engineering-workflow.md)
 - [USB packet-evidence tooling](references/usb-evidence-tooling.md)
 - [OpenAI-compatible API contract](references/openai-api-compatibility.md)

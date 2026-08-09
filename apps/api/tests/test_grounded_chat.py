@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import struct
@@ -13,9 +14,12 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 import localllm.grounded_chat as grounded_module
+from localllm.conversations import ConversationMessage
 from localllm.grounded_chat import (
     MAX_DATA_URL_CHARS,
+    MAX_PLANNED_QUERY_CHARS,
     MAX_QUERY_CHARS,
+    MAX_VISIBLE_ANSWER_CHARS,
     GroundedChatRequest,
     GroundedChatService,
     router,
@@ -84,8 +88,20 @@ class FakeStream:
         self.closed = True
 
 
+class FakeJSONResponse:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200):
+        self.content = json.dumps(payload).encode()
+        self.status_code = status_code
+
+
 class FakeOllama:
-    def __init__(self, lines: list[str] | None = None, status_code: int = 200):
+    def __init__(
+        self,
+        lines: list[str] | None = None,
+        status_code: int = 200,
+        planner_content: str | None = None,
+        planner_status_code: int = 200,
+    ):
         self.lines = lines or [
             json.dumps({"message": {"content": "Grounded "}, "done": False}),
             json.dumps(
@@ -98,8 +114,33 @@ class FakeOllama:
             ),
         ]
         self.status_code = status_code
+        self.planner_content = planner_content
+        self.planner_status_code = planner_status_code
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.planner_calls: list[tuple[str, dict[str, Any]]] = []
         self.streams: list[FakeStream] = []
+
+    async def proxy_json(self, endpoint: str, payload: dict[str, Any]) -> FakeJSONResponse:
+        self.planner_calls.append((endpoint, payload))
+        plan_data = json.loads(payload["messages"][-1]["content"])
+        question = plan_data["question"]
+        mode = plan_data["requested_mode"]
+        if self.planner_content is not None:
+            content = self.planner_content
+        elif mode == "all":
+            content = json.dumps(
+                {
+                    "queries": [
+                        {"query": question, "mode": "web"},
+                        {"query": question, "mode": "papers"},
+                    ]
+                }
+            )
+        else:
+            content = json.dumps({"queries": [{"query": question, "mode": mode}]})
+        return FakeJSONResponse(
+            {"message": {"content": content}}, status_code=self.planner_status_code
+        )
 
     async def proxy_stream(self, endpoint: str, payload: dict[str, Any]) -> FakeStream:
         self.calls.append((endpoint, payload))
@@ -120,6 +161,16 @@ class FakeSearch:
             raise self.error
         assert self.outcome is not None
         return self.outcome
+
+
+class ScriptedSearch:
+    def __init__(self, handler):
+        self.handler = handler
+        self.calls: list[tuple[str, str, int]] = []
+
+    async def quick_search(self, query: str, mode: str, limit: int) -> SearchOutcome:
+        self.calls.append((query, mode, limit))
+        return await self.handler(query, mode, limit)
 
 
 def source_outcome(*, warning: str | None = None) -> SearchOutcome:
@@ -185,11 +236,17 @@ async def test_web_grounding_searches_deterministically_and_streams_typed_events
 
     events = await collect(GroundedChatService(search, ollama), request)
 
-    assert search.calls == [("What does the newest evidence show?", "both", 7)]
+    assert search.calls == [
+        ("What does the newest evidence show?", "web", 7),
+        ("What does the newest evidence show?", "papers", 7),
+    ]
     assert [event for event, _data in events] == [
         "status",
         "status",
+        "status",
+        "status",
         "warning",
+        "status",
         "source",
         "status",
         "delta",
@@ -212,11 +269,22 @@ async def test_web_grounding_searches_deterministically_and_streams_typed_events
                 "name": "crossref",
                 "kind": "paper",
                 "ok": True,
-                "result_count": 1,
-                "duration_ms": 12,
+                "status": "healthy",
+                "attempts": 2,
+                "successful_attempts": 2,
+                "result_count": 2,
+                "duration_ms": 24,
+                "queries": ["What does the newest evidence show?"],
                 "error": None,
             }
         ],
+        "search_plan": {
+            "planner": "local-model",
+            "queries": [
+                {"query": "What does the newest evidence show?", "mode": "web"},
+                {"query": "What does the newest evidence show?", "mode": "papers"},
+            ],
+        },
         "warnings": ["One optional provider was unavailable"],
     }
     assert [data["content"] for event, data in events if event == "delta"] == [
@@ -239,6 +307,8 @@ async def test_web_grounding_searches_deterministically_and_streams_typed_events
         "What does the newest evidence show?"
     )
     assert ollama.streams[0].closed
+    assert ollama.planner_calls[0][1]["format"]["additionalProperties"] is False
+    assert ollama.planner_calls[0][1]["think"] is False
 
 
 @pytest.mark.asyncio
@@ -267,8 +337,231 @@ async def test_search_query_is_whitespace_normalized_and_bounded() -> None:
     await collect(GroundedChatService(search, ollama), request)
 
     query = search.calls[0][0]
-    assert len(query) == MAX_QUERY_CHARS
+    assert len(query) <= MAX_PLANNED_QUERY_CHARS < MAX_QUERY_CHARS
+    assert len(query) > MAX_PLANNED_QUERY_CHARS // 2
     assert "  " not in query
+
+
+@pytest.mark.asyncio
+async def test_invalid_url_or_tool_shaped_planner_output_uses_multilingual_fallback() -> None:
+    search = FakeSearch(source_outcome())
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {
+                        "query": "https://127.0.0.1/private",
+                        "mode": "web",
+                        "tool": "browser.open",
+                    }
+                ]
+            }
+        )
+    )
+    request = GroundedChatRequest(
+        messages=[
+            {
+                "role": "user",
+                "content": "请调查 https://example.com/report 的量子传感器最新证据",
+            }
+        ],
+        mode="all",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    planned = next(
+        data for event, data in events if event == "status" and data["stage"] == "planned"
+    )
+    assert planned["planner"] == "deterministic-fallback"
+    assert {item["mode"] for item in planned["queries"]} == {"web", "papers"}
+    assert all("http" not in item["query"] for item in planned["queries"])
+    assert any("学术研究" in item["query"] for item in planned["queries"])
+    assert any(
+        "deterministic language-aware" in data["message"]
+        for event, data in events
+        if event == "warning"
+    )
+    assert len(search.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_all_mode_supplements_a_model_plan_that_omits_the_scholarly_lane() -> None:
+    question = "Compare current retrieval grounded citation methods"
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {"query": f"{question} official evidence", "mode": "web"},
+                    {"query": f"{question} independent sources", "mode": "web"},
+                ]
+            }
+        )
+    )
+    search = FakeSearch(source_outcome())
+    request = GroundedChatRequest(
+        messages=[{"role": "user", "content": question}],
+        mode="all",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    planned = next(
+        data for event, data in events if event == "status" and data["stage"] == "planned"
+    )
+    assert planned["planner"] == "local-model+deterministic-lane"
+    assert [item["mode"] for item in planned["queries"]].count("papers") == 1
+    assert {mode for _query, mode, _limit in search.calls} == {"web", "papers"}
+
+
+@pytest.mark.asyncio
+async def test_planner_variants_unrelated_to_the_question_are_not_searched() -> None:
+    question = "retrieval grounded citation accuracy"
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {"query": f"{question} benchmark", "mode": "papers"},
+                    {"query": "unrelated celebrity gossip and sports", "mode": "papers"},
+                ]
+            }
+        )
+    )
+    search = FakeSearch(source_outcome())
+
+    await collect(
+        GroundedChatService(search, ollama),
+        GroundedChatRequest(
+            messages=[{"role": "user", "content": question}],
+            mode="papers",
+        ),
+    )
+
+    assert search.calls == [(f"{question} benchmark", "papers", 10)]
+
+
+@pytest.mark.asyncio
+async def test_variant_search_is_concurrent_but_capped_and_partial_failures_are_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grounded_module, "SEARCH_VARIANT_CONCURRENCY", 2)
+    active = 0
+    peak_active = 0
+
+    async def handler(query: str, mode: str, _limit: int) -> SearchOutcome:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            await asyncio.sleep(0.01)
+            successful = not query.endswith("third")
+            outcome = source_outcome() if successful else SearchOutcome(query, mode, [], [], [])
+            outcome.providers = [
+                ProviderDiagnostic(
+                    "shared-provider",
+                    mode,
+                    successful,
+                    len(outcome.sources),
+                    10,
+                    "secret-token-internal-error" if not successful else None,
+                    [query],
+                )
+            ]
+            return outcome
+        finally:
+            active -= 1
+
+    question = "adaptive evidence search"
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {"query": f"{question} first", "mode": "web"},
+                    {"query": f"{question} second", "mode": "web"},
+                    {"query": f"{question} third", "mode": "web"},
+                ]
+            }
+        )
+    )
+    search = ScriptedSearch(handler)
+    request = GroundedChatRequest(
+        messages=[{"role": "user", "content": question}],
+        mode="web",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    assert peak_active == 2
+    done = events[-1][1]
+    assert len(done["sources"]) == 1
+    diagnostic = done["providers"][0]
+    assert diagnostic["status"] == "partial"
+    assert diagnostic["attempts"] == 3
+    assert diagnostic["successful_attempts"] == 2
+    assert diagnostic["error"] == "Provider partially unavailable"
+    assert "secret-token" not in json.dumps(done)
+
+
+@pytest.mark.asyncio
+async def test_one_timed_out_variant_does_not_discard_successful_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grounded_module, "SEARCH_VARIANT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(grounded_module, "SEARCH_TOTAL_TIMEOUT_SECONDS", 0.05)
+
+    async def handler(query: str, _mode: str, _limit: int) -> SearchOutcome:
+        if query.endswith("slow"):
+            await asyncio.sleep(1)
+        return source_outcome()
+
+    question = "bounded retrieval deadlines"
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {"query": f"{question} fast", "mode": "web"},
+                    {"query": f"{question} slow", "mode": "web"},
+                ]
+            }
+        )
+    )
+    events = await collect(
+        GroundedChatService(ScriptedSearch(handler), ollama),
+        GroundedChatRequest(
+            messages=[{"role": "user", "content": question}],
+            mode="web",
+        ),
+    )
+
+    assert events[-1][0] == "done"
+    assert events[-1][1]["sources"]
+    assert any("timed out" in data["message"] for event, data in events if event == "warning")
+
+
+@pytest.mark.asyncio
+async def test_cancelling_variant_execution_cancels_in_flight_searches() -> None:
+    started = asyncio.Event()
+    cancelled = 0
+
+    async def handler(_query: str, _mode: str, _limit: int) -> SearchOutcome:
+        nonlocal cancelled
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+        raise AssertionError("unreachable")
+
+    service = GroundedChatService(ScriptedSearch(handler), FakeOllama())
+    plan = grounded_module._fallback_search_plan("cancel bounded searches", "web")
+    execution = asyncio.create_task(service._execute_search_plan(plan, 10))
+    await started.wait()
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    assert cancelled >= 1
 
 
 @pytest.mark.asyncio
@@ -301,6 +594,7 @@ async def test_image_is_preserved_and_text_model_is_safely_routed_to_vision() ->
     assert model_payload["messages"][0]["images"] == [image.split(",", 1)[1]]
     assert "[Attached image 1]" in model_payload["messages"][0]["content"]
     assert search.calls == []
+    assert ollama.planner_calls == []
 
 
 @pytest.mark.asyncio
@@ -374,6 +668,311 @@ async def test_search_exception_is_sanitized() -> None:
     assert events[-1][1]["message"] == "Search providers could not complete this request."
     assert "secret" not in events[-1][1]["message"]
     assert ollama.calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_stays_local_for_ordinary_chat() -> None:
+    search = FakeSearch(source_outcome())
+    ollama = FakeOllama(lines=[json.dumps({"message": {"content": "Local answer."}, "done": True})])
+    request = GroundedChatRequest(
+        messages=[{"role": "user", "content": "Help me refactor this function cleanly"}],
+        mode="auto",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    routed = next(
+        data for event, data in events if event == "status" and data["stage"] == "routing"
+    )
+    assert routed["resolved_mode"] == "local"
+    assert search.calls == []
+    assert ollama.planner_calls == []
+    assert events[-1][1]["mode"] == "auto"
+    assert events[-1][1]["resolved_mode"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_routes_fresh_and_scholarly_requests() -> None:
+    search = FakeSearch(source_outcome())
+    ollama = FakeOllama()
+    request = GroundedChatRequest(
+        messages=[
+            {
+                "role": "user",
+                "content": "Find the latest peer-reviewed papers about local inference",
+            }
+        ],
+        mode="auto",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    routed = next(
+        data for event, data in events if event == "status" and data["stage"] == "routing"
+    )
+    assert routed["resolved_mode"] == "all"
+    assert {mode for _query, mode, _limit in search.calls} == {"web", "papers"}
+    assert events[-1][1]["resolved_mode"] == "all"
+    assert events[-1][1]["search_plan"]["routing"]["strategy"] == ("deterministic-local-first")
+
+
+@pytest.mark.parametrize("mode", ["auto", "web", "papers", "all"])
+@pytest.mark.asyncio
+async def test_grounded_modes_clarify_unresolved_followups_without_external_dispatch(
+    mode: str,
+) -> None:
+    search = FakeSearch(source_outcome())
+    ollama = FakeOllama()
+    request = GroundedChatRequest(
+        messages=[
+            {"role": "user", "content": "PRIVATE-TRANSCRIPT-SENTINEL"},
+            {"role": "assistant", "content": "Earlier context that must stay local."},
+            {"role": "user", "content": "What about its latest release?"},
+        ],
+        mode=mode,
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    clarification = next(data for event, data in events if event == "clarification")
+    assert clarification["reason"] == "unresolved_search_reference"
+    assert "Which specific" in clarification["message"]
+    assert any(
+        event == "delta" and data["content"] == clarification["message"] for event, data in events
+    )
+    assert events[-1][0] == "done"
+    assert events[-1][1]["sources"] == []
+    assert events[-1][1]["providers"] == []
+    assert search.calls == []
+    assert ollama.planner_calls == []
+    assert ollama.calls == []
+    assert "PRIVATE-TRANSCRIPT-SENTINEL" not in json.dumps(events)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What about its latest release?",
+        "Find papers about its safety record.",
+        "它的最新版本是什么？",
+        "最新版本是什么？",
+    ],
+)
+def test_unresolved_search_reference_detection(question: str) -> None:
+    assert grounded_module._needs_search_clarification(question)
+
+
+def test_named_search_subject_does_not_trigger_followup_clarification() -> None:
+    assert not grounded_module._needs_search_clarification("What about Qwen3's latest release?")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Who is the president of France?",
+        "What is the current USD to EUR exchange rate?",
+        "Show the NBA standings.",
+        "Which CUDA version supports this PyTorch release?",
+    ],
+)
+def test_auto_mode_routes_live_entity_and_compatibility_queries_to_web(question: str) -> None:
+    assert grounded_module._auto_grounding_mode(question)[0] == "web"
+
+
+def test_planner_relevance_ignores_stopwords_and_single_cjk_characters() -> None:
+    english = [grounded_module.PlannedSearch(query="is the weather today", mode="web")]
+    chinese = [grounded_module.PlannedSearch(query="今天的天气如何", mode="web")]
+
+    assert not grounded_module._plan_is_relevant(english, "What is the best local model?")
+    assert not grounded_module._plan_is_relevant(chinese, "请比较本地语言模型的性能")
+
+
+@pytest.mark.parametrize(
+    ("question", "unrelated"),
+    [
+        ("¿Qué modelo local es mejor para programar?", "Consejos para cocinar pasta"),
+        ("Quel modèle local pour coder?", "Recettes pour cuisiner"),
+        ("Welches lokale Modell ist gut?", "Das Wetter ist sonnig"),
+    ],
+)
+def test_planner_relevance_rejects_shared_multilingual_stopwords(
+    question: str, unrelated: str
+) -> None:
+    plan = [grounded_module.PlannedSearch(query=unrelated, mode="web")]
+    assert not grounded_module._plan_is_relevant(plan, question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Calculate the current through a 10 ohm resistor.",
+        "Write source code for a Python parser.",
+        "Explain link-time optimization.",
+    ],
+)
+def test_auto_mode_does_not_send_ambiguous_local_tasks_to_search(question: str) -> None:
+    assert grounded_module._auto_grounding_mode(question)[0] == "local"
+
+
+@pytest.mark.parametrize("question", ["example.org/reference", "//example.org/reference"])
+def test_auto_mode_routes_pasted_public_urls_to_web(question: str) -> None:
+    assert grounded_module._auto_grounding_mode(question)[0] == "web"
+
+
+def test_auto_mode_keeps_doi_and_local_path_inputs_off_the_general_web_lane() -> None:
+    assert grounded_module._auto_grounding_mode("10.1038/s41586-024-07487-w")[0] == "papers"
+    assert grounded_module._auto_grounding_mode(r"C:\\Users\\Alice\\report.txt")[0] == "local"
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["Write package.json", "Compare v1.2.3 and v1.3.0", "Explain TCP/IP and node.js/npm"],
+)
+def test_auto_mode_keeps_dotted_technical_tokens_local(question: str) -> None:
+    assert grounded_module._auto_grounding_mode(question)[0] == "local"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Explain fastapi.middleware/cors behavior",
+        "Explain torch.nn/functional",
+        "Show how os.path/join works",
+        "Explain react.dom/render",
+        "Describe com.example/module",
+        "Explain com.google/android/gms",
+        "Explain com.apple/foundation",
+        "Explain com.microsoft/graph",
+    ],
+)
+def test_auto_mode_keeps_dotted_code_namespaces_local(question: str) -> None:
+    assert grounded_module._auto_grounding_mode(question)[0] == "local"
+
+
+def test_auto_mode_routes_a_real_bare_public_host_path_to_web() -> None:
+    assert (
+        grounded_module._auto_grounding_mode("docs.python.org/3/library/asyncio.html")[0] == "web"
+    )
+
+
+def test_fallback_query_never_forwards_signed_url_secrets() -> None:
+    plan = grounded_module._fallback_search_plan(
+        "Verify https://example.org/private/object?token=SECRET123&sig=SIGNED456 now",
+        "web",
+    )
+    serialized = " ".join(item.query for item in plan)
+    assert "example.org" in serialized
+    assert "SECRET123" not in serialized
+    assert "SIGNED456" not in serialized
+    assert "private" not in serialized
+
+
+def test_fallback_query_preserves_technical_package_paths() -> None:
+    plan = grounded_module._fallback_search_plan(
+        "Search node.js/npm and package.json/scripts compatibility",
+        "web",
+    )
+
+    assert all("node.js/npm" in item.query for item in plan)
+    assert all("package.json/scripts" in item.query for item in plan)
+
+
+@pytest.mark.parametrize(
+    ("url", "public_host"),
+    [
+        ("example.org/private/object?token=TOPSECRET&sig=SIGNED", "example.org"),
+        ("//example.org/private/object?token=TOPSECRET&sig=SIGNED", "example.org"),
+        ("user:pass@example.org/private?token=TOPSECRET", "example.org"),
+        ("localhost/private?token=TOPSECRET", "network resource"),
+        ("192.168.1.7/private?token=TOPSECRET", "network resource"),
+        ("intranet/private?token=TOPSECRET", "network resource"),
+        ("例子.公司/private?token=TOPSECRET", "例子.公司"),
+        ("example.xn--fiqs8s/private?token=TOPSECRET", "example.xn--fiqs8s"),
+        ("host:443/private?token=TOPSECRET", "network resource"),
+    ],
+)
+def test_fallback_query_redacts_all_signed_url_shapes(url: str, public_host: str) -> None:
+    plan = grounded_module._fallback_search_plan(f"Verify {url} now", "web")
+    serialized = " ".join(item.query for item in plan)
+
+    assert public_host in serialized
+    assert "TOPSECRET" not in serialized
+    assert "private" not in serialized
+    assert "user:pass" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_local_planner_never_receives_or_replays_signed_url_material() -> None:
+    question = "Verify https://example.org/private/object?token=TOPSECRET&sig=SIGNED now"
+    ollama = FakeOllama(
+        planner_content=json.dumps(
+            {
+                "queries": [
+                    {
+                        "query": "example org private TOPSECRET latest documentation",
+                        "mode": "web",
+                    }
+                ]
+            }
+        )
+    )
+    search = FakeSearch(source_outcome())
+
+    events = await collect(
+        GroundedChatService(search, ollama),
+        GroundedChatRequest(messages=[{"role": "user", "content": question}], mode="web"),
+    )
+
+    planner_messages = ollama.planner_calls[0][1]["messages"]
+    assert isinstance(planner_messages, list)
+    planner_payload = json.dumps(planner_messages[-1], ensure_ascii=False)
+    searched = " ".join(query for query, _mode, _limit in search.calls)
+    planned = next(
+        data for event, data in events if event == "status" and data["stage"] == "planned"
+    )
+    assert "TOPSECRET" not in planner_payload
+    assert "SIGNED" not in planner_payload
+    assert "private" not in planner_payload
+    assert "TOPSECRET" not in searched
+    assert "SIGNED" not in searched
+    assert "private" not in searched
+    assert planned["planner"] == "deterministic-fallback"
+
+
+def test_grounding_budget_skips_oversized_first_source_and_reindexes_fitted_evidence() -> None:
+    oversized = {
+        "index": 1,
+        "title": "T" * 500,
+        "url": f"https://example.org/{'u' * 2_000}",
+        "snippet": "S" * 2_400,
+        "provider": "provider",
+        "kind": "web",
+        "authors": [],
+        "year": 2026,
+        "doi": "10.1234/" + "d" * 290,
+    }
+    fitted = {
+        "index": 2,
+        "title": "Compact evidence",
+        "url": "https://example.org/compact",
+        "snippet": "A bounded supporting excerpt.",
+        "provider": "provider",
+        "kind": "web",
+        "authors": [],
+        "year": 2026,
+        "doi": None,
+    }
+
+    message, included = grounded_module._grounding_message([oversized, fitted], 2_864)
+
+    assert len(included) == 1
+    assert included[0]["title"] == "Compact evidence"
+    assert included[0]["index"] == 1
+    evidence = message["content"].split("BEGIN_UNTRUSTED_SEARCH_EVIDENCE\n", 1)[1]
+    evidence = evidence.split("\nEND_UNTRUSTED_SEARCH_EVIDENCE", 1)[0]
+    record = json.loads(evidence)
+    assert record["citation"] == "[1]"
+    assert record["title"] == "Compact evidence"
 
 
 @pytest.mark.asyncio
@@ -591,6 +1190,43 @@ async def test_grounded_answer_citation_anomalies_are_streamed_and_recorded(
     assert events[-2] == ("warning", {"message": citation_warnings[0]})
     assert events[-1][0] == "done"
     assert events[-1][1]["warnings"] == citation_warnings
+
+
+@pytest.mark.asyncio
+async def test_oversized_grounded_answer_finishes_with_a_durable_truncated_message() -> None:
+    search = FakeSearch(source_outcome())
+    oversized_answer = "Supported by the retrieved evidence [1]. " + "x" * 40_000
+    ollama = FakeOllama([json.dumps({"message": {"content": oversized_answer}, "done": False})])
+    request = GroundedChatRequest(
+        messages=[{"role": "user", "content": "Give me a cited evidence summary"}],
+        mode="papers",
+    )
+
+    events = await collect(GroundedChatService(search, ollama), request)
+
+    persisted_answer = "".join(data["content"] for event, data in events if event == "delta")
+    streamed_warnings = [data["message"] for event, data in events if event == "warning"]
+    assert persisted_answer == oversized_answer[:MAX_VISIBLE_ANSWER_CHARS]
+    assert len(persisted_answer) == MAX_VISIBLE_ANSWER_CHARS < 32_000
+    assert streamed_warnings == [
+        "The answer was truncated at 30,000 characters so it can be saved to conversation history."
+    ]
+    assert not any(event == "error" for event, _data in events)
+    assert events[-1][0] == "done"
+    assert events[-1][1]["answer_truncated"] is True
+    assert events[-1][1]["warnings"] == streamed_warnings
+    assert ollama.streams[0].closed
+    stored_message = ConversationMessage(role="assistant", content=persisted_answer)
+    assert stored_message.content == persisted_answer
+    followup = GroundedChatRequest(
+        messages=[
+            {"role": "user", "content": "Initial evidence request"},
+            {"role": "assistant", "content": persisted_answer},
+            {"role": "user", "content": "Continue from that answer"},
+        ],
+        mode="local",
+    )
+    assert followup.messages[-1].role == "user"
 
 
 @pytest.mark.asyncio

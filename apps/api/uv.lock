@@ -927,6 +927,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic-settings" },
     { name = "python-multipart" },
+    { name = "tld" },
     { name = "trafilatura" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -953,6 +954,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24,<1" },
     { name = "python-multipart", specifier = ">=0.0.12,<1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
+    { name = "tld", specifier = ">=0.13,<1" },
     { name = "trafilatura", specifier = ">=2,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32,<1" },
 ]

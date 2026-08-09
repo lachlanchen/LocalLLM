@@ -7,13 +7,15 @@ http://127.0.0.1:8008/v1
 Authorization: Bearer local-dev-key
 ```
 
-`LOCALLLM_API_KEY` gates only `/v1/*`; setting it to an empty value disables
-that check. The shipped `local-dev-key` is an interoperability placeholder, not
-a secret. Management `/api/*` routes do not consult this key. Every route relies
-on the loopback peer restriction; all browser requests to `/api/*` and `/v1/*`
-additionally receive `Origin`/`Sec-Fetch-Site` checks. A
-native process in the same host network namespace can invoke them. Do not proxy
-or tunnel port 8008 without adding authentication and authorization.
+`LOCALLLM_API_KEY` gates `/v1/*` plus every separate image job/output read and
+mutation; only image-generation status remains loopback-public. Setting the key
+to an empty value disables both key checks. The shipped `local-dev-key` is an
+interoperability placeholder, not a secret. Other management `/api/*` routes do
+not consult this key. Every route relies on the loopback peer restriction; all
+browser requests to `/api/*` and `/v1/*` additionally receive
+`Origin`/`Sec-Fetch-Site` checks. A native process in the same host network
+namespace can invoke them. Do not proxy or tunnel port 8008 without adding
+authentication and authorization.
 
 The gateway accepts only the exact local Ollama upstream
 `http://127.0.0.1:11434`. Startup configuration rejects HTTPS, credentials,
@@ -68,16 +70,22 @@ localllm-embed       → bge-m3:latest
 - Compatibility means common request/response shapes, not identical model behavior.
 - Ollama supports a subset of OpenAI fields and tools. Unsupported fields may be ignored or rejected upstream.
 - Ollama’s Responses API does not provide cloud conversation storage. `previous_response_id` and `conversation` are not local state stores.
-- LocalLLM does not persist `/v1/*` request bodies or proxy responses. Playground
-  and Vision Lab thread state remains in browser memory. Deep Research reports
-  and Binary Studio uploads use separate persistent management routes under
-  `data/`; user-service output can also remain in systemd-journald according to
-  the host retention policy.
+- LocalLLM does not persist `/v1/*` request bodies or proxy responses. The
+  Playground uses a separate local SQLite management API under
+  `/api/conversations`; it does not turn OpenAI `conversation` or
+  `previous_response_id` fields into stateful APIs. Vision Lab remains in browser
+  memory. Deep Research reports and Binary Studio uploads use separate
+  persistent management routes under `data/`; user-service output can also
+  remain in systemd-journald according to the host retention policy.
 - Hosted OpenAI tools such as web search, file search, computer use, image generation, and code interpreter do not appear merely because the endpoint is named `/v1/responses`.
 - The app’s grounded Chat (`/api/agent/chat`), quick search (`/api/search`),
   and Deep Research routes are separate local orchestration APIs, not OpenAI
   hosted tools. Their contract is documented in
   [Search and Research API](search-research-api.md).
+- The plan-preview/confirmed-Python routes under `/api/agent/*` and the optional
+  Z-Image-Turbo routes under `/api/images/*` are likewise management APIs. They
+  are not exposed as `/v1/responses` tools; clients must opt into their separate
+  contracts and safety gates.
 - The `/v1` proxy forwards supported image content parts to Ollama; it does not
   apply the grounded agent's strict data-URL, signature, dimension, and remote-URL
   checks. For a local-only vision request, use a bounded local image encoded as a

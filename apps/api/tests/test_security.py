@@ -81,4 +81,5 @@ def test_security_headers_and_trusted_host() -> None:
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert "font-src 'self' data:" in response.headers["content-security-policy"]
     assert untrusted.status_code == 400

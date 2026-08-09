@@ -35,6 +35,21 @@ function neverEndingStreamedResponse(chunks: string[]) {
 }
 
 describe('local reverse-engineering API client', () => {
+  it('sends the current revision when deleting a conversation', async () => {
+    const response = { deleted: true as const, id: 'conv_0123456789abcdef0123456789abcdef' }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await expect(api.deleteConversation(response.id, 17, controller.signal)).resolves.toEqual(response)
+    expect(fetchMock).toHaveBeenCalledWith(`/api/conversations/${response.id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: 17 }),
+      signal: controller.signal,
+    })
+  })
+
   it('rejects unsafe or oversized image attachments before reading them', () => {
     expect(imageFileError(new File(['x'], 'payload.svg', { type: 'image/svg+xml' }))).toContain('PNG')
     expect(imageFileError(new File([], 'empty.png', { type: 'image/png' }))).toContain('empty')
@@ -306,6 +321,34 @@ describe('local reverse-engineering API client', () => {
         temperature: 0.35,
       }),
     }))
+  })
+
+  it('surfaces a typed search clarification while preserving its visible fallback delta', async () => {
+    const response = streamedResponse([
+      'event: status\ndata: {"stage":"clarifying","message":"Subject needed"}\n\n',
+      'event: clarification\ndata: {"reason":"unresolved_search_reference","message":"Which project do you mean?","resolved_mode":"web"}\n\n',
+      'event: delta\ndata: {"content":"Which project do you mean?"}\n\n',
+      'event: done\ndata: {"model":"qwen3:8b","requested_model":"localllm-fast","mode":"auto","resolved_mode":"web","sources":[],"providers":[],"warnings":[],"clarification":{"reason":"unresolved_search_reference","message":"Which project do you mean?","resolved_mode":"web"}}\n\n',
+    ])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const stages: string[] = []
+    const clarifications: string[] = []
+    let answer = ''
+
+    await streamAgentChat(
+      [{ id: 'followup', role: 'user', content: 'What about its latest release?' }],
+      'localllm-fast',
+      'auto',
+      {
+        onStatus: (event) => stages.push(event.stage),
+        onClarification: (event) => clarifications.push(event.reason),
+        onToken: (token) => { answer += token },
+      },
+    )
+
+    expect(stages).toEqual(['clarifying'])
+    expect(clarifications).toEqual(['unresolved_search_reference'])
+    expect(answer).toBe('Which project do you mean?')
   })
 
   it('routes a local vision turn through the guarded agent endpoint', async () => {

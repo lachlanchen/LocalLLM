@@ -6,6 +6,7 @@ export const CHAT_MODES: ReadonlyArray<{
   shortLabel: string
   description: string
 }> = [
+  { id: 'auto', label: 'Auto', shortLabel: 'Auto', description: 'Local first; searches only when the request explicitly needs fresh or scholarly evidence.' },
   { id: 'local', label: 'Local only', shortLabel: 'Local', description: 'Private model knowledge, with no network lookup.' },
   { id: 'web', label: 'Search web', shortLabel: 'Web', description: 'Current search results and snippets from multiple general providers.' },
   { id: 'papers', label: 'Search papers', shortLabel: 'Papers', description: 'Academic metadata, DOI records, and research indexes.' },
@@ -13,7 +14,7 @@ export const CHAT_MODES: ReadonlyArray<{
 ]
 
 export function chatModeToSearchMode(mode: ChatMode): SearchMode | null {
-  if (mode === 'local') return null
+  if (mode === 'local' || mode === 'auto') return null
   if (mode === 'all') return 'both'
   return mode
 }

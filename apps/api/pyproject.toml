@@ -12,6 +12,7 @@ dependencies = [
   "uvicorn[standard]>=0.32,<1",
   "ddgs>=9,<10",
   "trafilatura>=2,<3",
+  "tld>=0.13,<1",
 ]
 
 [project.optional-dependencies]

@@ -22,7 +22,7 @@ synthesis, not whether search tools are invoked correctly.
 
 ## Pipeline stages
 
-1. **Plan**: create one to three bounded query variants according to the selected depth and choose an up-to-six, up-to-twelve, or up-to-twenty-source budget. `LOCALLLM_SEARCH_MAX_RESULTS` can lower each budget.
+1. **Plan**: remove URL/URI credentials, paths, query strings, and fragments from the query-planning copy of the question, preserve DOI identifiers, create one to three bounded query variants according to the selected depth, and choose an up-to-six, up-to-twelve, or up-to-twenty-source budget. `LOCALLLM_SEARCH_MAX_RESULTS` can lower each budget.
 2. **Search**: fan out across the enabled provider lanes. Keyless web coverage uses structured Wikipedia MediaWiki, GitHub repository-search, and Hacker News Algolia APIs plus explicitly selected DDGS engines for DuckDuckGo, Brave, Yahoo, and Mojeek. Since DDGS eagerly buffers its engine response, every DDGS call runs in a cancellable worker with hard memory, CPU, deadline, environment, and output limits. Keyless paper coverage uses Crossref, Semantic Scholar at public limits, Europe PMC, and arXiv. Configured Brave, Tavily, Serper, OpenAlex, or Google Scholar-via-SerpAPI routes join the same federation. Provider-native rank and query provenance remain attached to every result; individual provider failures are visible and non-fatal when another lane returns evidence.
 3. **Normalize**: canonicalize URLs and DOIs, merge duplicate records by DOI/title/URL, score lexical overlap, reciprocal provider rank, corroboration, citations, recency, and source metadata, then reserve evidence slots for both web and paper lanes in `both` mode.
 4. **Read**: resolve targets, require every resolved address to be globally routable, and reject private, loopback, link-local, IPv6 site-local, multicast, reserved, unspecified, IPv4-mapped-private, and known IPv6 transition/translation destinations. Connect to a validated address while preserving the HTTP Host and TLS SNI, and repeat resolution and validation for every redirect. Page requests ask for `identity` content encoding and reject compressed replies so the five-million-byte streamed response limit also bounds decoded memory. Only supported text/HTML/XML content is extracted; PDFs are not parsed. Embedded base64/data payloads are removed before model use.
@@ -103,14 +103,32 @@ post-redirect source-identity handling, PDF extraction, and independent review.
 
 Research necessarily sends queries to the enabled external search and metadata
 providers and fetches public URLs. The selected LLM still runs locally. Chat
-uses the same retrieval broker only when Web, Papers, or All is selected;
+uses the same retrieval broker when Web, Papers, or All is selected, or when
+local-first Auto detects an explicit current/web/scholarly evidence request.
 Local mode and Vision Lab remain offline. LocalLLM never scrapes Google Scholar
 HTML: Google Scholar results require an operator-supplied SerpAPI key and use
 that third party's account, terms, and network boundary.
 
-Quick grounded Chat streams status immediately and answer tokens after its
-retrieval step. At completion it checks that visible citations exist and are
-within the returned evidence range, and shows a warning if not. Deep Research
+Pasted URL-shaped input is never forwarded verbatim as a provider query. Chat,
+direct Quick Search, and Deep Research reduce a URL or URI to a bounded
+hostname/authority label and remove credentials, path segments, query parameters,
+and fragments; local filesystem paths become the inert phrase `local path`. Chat additionally
+rejects a local model query plan if it reproduces a removed private term. DOI
+identifiers are not mistaken for URLs and remain intact for Papers searches.
+This boundary governs outbound query planning only: the original question can
+still be present in the local conversation database or saved research task.
+
+Quick grounded Chat streams status immediately. Auto first resolves the latest
+turn with a deterministic local-first router; explicit Local bypasses that router
+and all retrieval. A resolved search route asks the selected local model—without
+the saved transcript—for one to three schema-constrained search variants and
+publishes the accepted query/lane plan before retrieval. Invalid, URL-bearing, or
+tool-shaped planner output is replaced with deterministic language-aware queries.
+An unresolved referential follow-up produces a clarification and stops before any
+external request. Searches run under fixed concurrency and deadline bounds; their
+sources and provider diagnostics are merged across variants before answer tokens
+stream. At completion Chat checks that visible citations exist and are within the
+returned evidence range, and shows a warning if not. Deep Research
 is stricter: it buffers, validates, attempts one citation-repair pass, applies
 the conservative cited-unit salvage described above when necessary, and falls
 back to the validated evidence inventory when a small model remains invalid.

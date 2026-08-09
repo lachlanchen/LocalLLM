@@ -55,11 +55,62 @@ export interface ChatMessage {
   warning?: string
 }
 
-export type ChatMode = 'local' | 'web' | 'papers' | 'all'
+export interface ConversationMessage {
+  id?: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  image?: string
+  model?: string
+  mode?: ChatMode
+  sources?: ResearchSource[]
+  warning?: string
+}
+
+export interface ConversationListItem {
+  id: string
+  revision: number
+  title: string
+  model: string
+  mode: ChatMode
+  created_at: string
+  updated_at: string
+  summarized_message_count: number
+  summary_method: 'model' | 'extractive' | null
+  message_count: number
+  has_summary: boolean
+}
+
+export interface ConversationFull extends Omit<ConversationListItem, 'has_summary'> {
+  summary: string
+  messages: ConversationMessage[]
+}
+
+export interface ConversationListResponse {
+  conversations: ConversationListItem[]
+  limits: {
+    max_conversations: number
+    max_archive_bytes: number
+    max_messages: number
+  }
+}
+
+export interface ConversationCompactResponse {
+  conversation: ConversationFull
+  compacted: boolean
+  summary_method: 'model' | 'extractive' | null
+}
+
+export interface DeleteConversationResponse {
+  deleted: true
+  id: string
+}
+
+export type ChatMode = 'auto' | 'local' | 'web' | 'papers' | 'all'
 export type SearchMode = 'web' | 'papers' | 'both'
 export type ResearchDepth = 'quick' | 'standard' | 'deep'
 
 export interface ResearchSource {
+  index?: number
   title: string
   url: string
   snippet: string
@@ -80,7 +131,8 @@ export interface SourceProvenance {
   provider: string
   query: string
   record_id: string | null
-  retrieved_at: string
+  retrieved_at: string | null
+  provider_rank?: number | null
 }
 
 export interface SearchProviderStatus {
@@ -125,13 +177,21 @@ export interface AgentStatusEvent {
   model?: string
 }
 
+export interface AgentClarificationEvent {
+  reason: 'unresolved_search_reference'
+  message: string
+  resolved_mode: Exclude<ChatMode, 'auto' | 'local'>
+}
+
 export interface AgentDoneEvent {
   model: string
   requested_model: string
   mode: ChatMode
+  resolved_mode?: Exclude<ChatMode, 'auto'>
   sources: ResearchSource[]
   providers: SearchProviderRun[]
   warnings: string[]
+  clarification?: AgentClarificationEvent
 }
 
 export interface ResearchTask {

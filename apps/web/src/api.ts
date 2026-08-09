@@ -1,9 +1,15 @@
 import type {
+  AgentClarificationEvent,
   AgentDoneEvent,
   AgentStatusEvent,
   BinaryMetadata,
   CatalogResponse,
   ChatMessage,
+  ConversationCompactResponse,
+  ConversationFull,
+  ConversationListResponse,
+  ConversationMessage,
+  DeleteConversationResponse,
   DeleteInspectionResponse,
   McpInvestigationResult,
   McpStatus,
@@ -19,6 +25,16 @@ import type {
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 export const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+
+export class ApiError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
 
 function apiErrorMessage(error: unknown): string {
   if (typeof error === 'string') return error
@@ -42,7 +58,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, init)
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(detail || `${response.status} ${response.statusText}`)
+    throw new ApiError(response.status, detail || `${response.status} ${response.statusText}`)
   }
   return response.json() as Promise<T>
 }
@@ -63,6 +79,58 @@ export const api = {
       ...(signal ? { signal } : {}),
     }),
   searchStatus: () => request<SearchStatus>('/api/search/status'),
+  conversations: (signal?: AbortSignal) => request<ConversationListResponse>(
+    '/api/conversations',
+    signal ? { signal } : undefined,
+  ),
+  createConversation: (
+    payload: {
+      title?: string
+      model?: string
+      mode?: import('./types').ChatMode
+      messages?: ConversationMessage[]
+    },
+    signal?: AbortSignal,
+  ) => request<ConversationFull>('/api/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(signal ? { signal } : {}),
+  }),
+  conversation: (id: string, signal?: AbortSignal) => request<ConversationFull>(
+    `/api/conversations/${encodeURIComponent(id)}`,
+    signal ? { signal } : undefined,
+  ),
+  updateConversation: (
+    id: string,
+    payload: Partial<Pick<ConversationFull, 'title' | 'model' | 'mode' | 'messages'>> & {
+      expected_revision: number
+    },
+    signal?: AbortSignal,
+  ) => request<ConversationFull>(`/api/conversations/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(signal ? { signal } : {}),
+  }),
+  deleteConversation: (id: string, expectedRevision: number, signal?: AbortSignal) =>
+    request<DeleteConversationResponse>(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+      ...(signal ? { signal } : {}),
+    }),
+  compactConversation: (
+    id: string,
+    model: string,
+    keepRecent = 12,
+    signal?: AbortSignal,
+  ) => request<ConversationCompactResponse>(`/api/conversations/${encodeURIComponent(id)}/compact`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, keep_recent: keepRecent }),
+    ...(signal ? { signal } : {}),
+  }),
   search: (query: string, mode: SearchMode, limit = 12, signal?: AbortSignal) =>
     request<SearchResponse>('/api/search', {
       method: 'POST',
@@ -191,6 +259,7 @@ function toOpenAiMessages(messages: ChatMessage[]) {
 
 export interface AgentChatHandlers {
   onStatus?: (event: AgentStatusEvent) => void
+  onClarification?: (event: AgentClarificationEvent) => void
   onSource?: (source: ResearchSource) => void
   onWarning?: (message: string) => void
   onToken: (token: string) => void
@@ -212,7 +281,7 @@ export async function streamAgentChat(
       messages: toOpenAiMessages(messages),
       model,
       mode,
-      limit: mode === 'all' ? 18 : 12,
+      limit: mode === 'all' || mode === 'auto' ? 18 : 12,
       temperature: 0.35,
     }),
     signal,
@@ -237,6 +306,7 @@ export async function streamAgentChat(
     catch { return false }
     if (eventName === 'error') throw new Error(typeof payload.message === 'string' ? payload.message : 'The local agent stopped unexpectedly.')
     if (eventName === 'status') handlers.onStatus?.(payload as unknown as AgentStatusEvent)
+    if (eventName === 'clarification') handlers.onClarification?.(payload as unknown as AgentClarificationEvent)
     if (eventName === 'source') handlers.onSource?.(payload as unknown as ResearchSource)
     if (eventName === 'warning' && typeof payload.message === 'string') handlers.onWarning?.(payload.message)
     if (eventName === 'delta' && typeof payload.content === 'string') handlers.onToken(payload.content)

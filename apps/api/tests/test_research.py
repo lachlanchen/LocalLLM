@@ -256,6 +256,98 @@ async def test_query_planning_is_deterministic_and_model_independent(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_paper_query_planning_preserves_doi_identifiers(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("doiplanning")
+    task.question = "Explain DOI 10.1038/s41586-024-07487-w"
+    task.mode = "papers"
+    task.depth = "standard"
+
+    queries = await manager._plan_queries(task)
+
+    assert all("10.1038/s41586-024-07487-w" in query for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_research_query_planning_preserves_technical_package_paths(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("packageplanning")
+    task.question = "Compare node.js/npm and package.json/scripts compatibility"
+    task.mode = "web"
+    task.depth = "standard"
+
+    queries = await manager._plan_queries(task)
+
+    assert all("node.js/npm" in query for query in queries)
+    assert all("package.json/scripts" in query for query in queries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.org/private?token=TOPSECRET&sig=SIGNED",
+        "example.org/private?token=TOPSECRET&sig=SIGNED",
+        "//example.org/private?token=TOPSECRET&sig=SIGNED",
+        "URL:https://example.org/private?token=TOPSECRET&sig=SIGNED",
+        "[source](https://example.org/private?token=TOPSECRET&sig=SIGNED)",
+        r"https://example.org\private\SECRET?token=TOPSECRET&sig=SIGNED",
+        "https://example.org%2Fprivate%2FSECRET?token=TOPSECRET&sig=SIGNED",
+    ],
+)
+async def test_deep_research_plans_only_from_redacted_public_url_hosts(
+    tmp_path: Path, url: str
+) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("urlprivacy")
+    task.question = f"Verify {url} now"
+    task.mode = "web"
+    task.depth = "deep"
+
+    queries = await manager._plan_queries(task)
+    serialized = " ".join(queries)
+
+    assert "example.org" in serialized
+    assert "TOPSECRET" not in serialized
+    assert "SIGNED" not in serialized
+    assert "private" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_deep_research_redacts_labeled_local_paths(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("pathprivacy")
+    task.question = r"Compare path:/home/alice/secret.txt and file=C:\Users\Alice\private.log"
+    task.mode = "web"
+    task.depth = "standard"
+
+    queries = await manager._plan_queries(task)
+    serialized = " ".join(queries).casefold()
+
+    assert "local path" in serialized
+    assert "alice" not in serialized
+    assert "secret" not in serialized
+    assert "private" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_deep_research_redacts_encoded_local_paths(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("encodedpathprivacy")
+    task.question = "Compare %2Fhome%2Falice%2Fsecret.txt with file:///srv/private.log"
+    task.mode = "web"
+    task.depth = "standard"
+
+    queries = await manager._plan_queries(task)
+    serialized = " ".join(queries).casefold()
+
+    assert "local path" in serialized
+    assert "alice" not in serialized
+    assert "secret" not in serialized
+    assert "private" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_manager_tracks_and_cancels_background_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from localllm.config import Settings
+from localllm.config import Settings, prepare_private_data_dir
 
 
 def test_allowed_origins_accept_json_environment_value(monkeypatch) -> None:
@@ -88,3 +88,26 @@ def test_search_provider_credentials_use_localllm_environment_namespace(
 def test_search_resource_limits_are_bounded(field: str, value: int) -> None:
     with pytest.raises(ValueError):
         Settings(_env_file=None, **{field: value})
+
+
+def test_image_generation_is_default_off_and_resource_settings_are_bounded() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.image_generation_enabled is False
+    assert settings.image_generation_gpu == 0
+    with pytest.raises(ValueError):
+        Settings(image_generation_gpu=16, _env_file=None)
+    with pytest.raises(ValueError):
+        Settings(image_generation_timeout_seconds=59, _env_file=None)
+
+
+def test_private_data_directory_does_not_follow_a_final_symlink(tmp_path) -> None:
+    target = tmp_path / "unrelated"
+    target.mkdir(mode=0o755)
+    link = tmp_path / "data"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="not a symlink"):
+        prepare_private_data_dir(link)
+
+    assert target.stat().st_mode & 0o777 == 0o755

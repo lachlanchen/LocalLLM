@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -8,6 +10,25 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def prepare_private_data_dir(path: Path) -> Path:
+    """Create/open the configured data directory without following a final symlink."""
+
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("LocalLLM data directory must be a real directory, not a symlink") from exc
+    try:
+        entry = os.fstat(descriptor)
+        if not stat.S_ISDIR(entry.st_mode):
+            raise ValueError("LocalLLM data path is not a directory")
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+    return path
 
 
 class Settings(BaseSettings):
@@ -36,6 +57,16 @@ class Settings(BaseSettings):
     ghidra_home: Path = Path("./.local/opt/ghidra_12.0.3_PUBLIC")
     oghidra_home: Path = Path("./.local/tools/OGhidra")
     pyghidra_mcp_url: str = "http://127.0.0.1:18765/mcp"
+
+    # Agent-side code execution is intentionally a separate, operator-controlled
+    # capability. Building the sandbox image does not enable it.
+    agent_code_execution_enabled: bool = False
+
+    # Image generation is an optional, isolated worker. Installing its runtime or
+    # model does not enable the API or reserve a GPU.
+    image_generation_enabled: bool = False
+    image_generation_gpu: int = Field(default=0, ge=0, le=15)
+    image_generation_timeout_seconds: int = Field(default=300, ge=60, le=900)
 
     # Search credentials are optional. Providers with no key remain available, while
     # configured providers are federated and their failures are reported per request.

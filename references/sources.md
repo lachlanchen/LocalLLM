@@ -11,6 +11,13 @@ Accessed 2026-08-08 through 2026-08-09 unless noted otherwise.
 - Runtime pin: [Ollama v0.32.6](https://github.com/ollama/ollama/releases/tag/v0.32.6), Linux amd64 archive SHA-256 `dec2fa50d24e6868ca3c4c977d69d059399372105f951a9acc320a5a79aadcfc`; [scheduler source at that tag](https://github.com/ollama/ollama/blob/v0.32.6/server/sched.go).
 - Alternative runtime pin: [llama.cpp b10327](https://github.com/ggml-org/llama.cpp/releases/tag/b10327), commit [`69bf6437914596fbbc4caf09a7ac16f2acdd1a94`](https://github.com/ggml-org/llama.cpp/commit/69bf6437914596fbbc4caf09a7ac16f2acdd1a94); see its pinned [multi-GPU guide](https://github.com/ggml-org/llama.cpp/blob/69bf6437914596fbbc4caf09a7ac16f2acdd1a94/docs/multi-gpu.md).
 
+## Optional image generation
+
+- Selected checkpoint: the official [Tongyi-MAI/Z-Image-Turbo model](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/tree/f332072aa78be7aecdf3ee76d5c247082da564a6) at revision `f332072aa78be7aecdf3ee76d5c247082da564a6`, licensed Apache-2.0. Its official card describes a 6B architecture, eight DiT forwards, a supported BF16 Diffusers example, and a sub-16-GB consumer-VRAM target.
+- Official implementation: [Tongyi-MAI/Z-Image](https://github.com/Tongyi-MAI/Z-Image/tree/26f23eda626ffadda020b04ff79488e1d72004cd) at commit `26f23eda626ffadda020b04ff79488e1d72004cd`, Apache-2.0.
+- Runtime API: [Diffusers Z-Image pipeline documentation](https://huggingface.co/docs/diffusers/v0.39.0/en/api/pipelines/z_image) and the published `diffusers==0.39.0` wheel. The wheel was independently inspected to confirm that it contains the text-to-image, image-to-image, inpainting, ControlNet, and Omni Z-Image pipeline modules; LocalLLM exposes text-to-image only.
+- Rejected single-card default: official [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell/tree/741f7c3ce8b383c54771c7003378a50191e9efe9) at revision `741f7c3ce8b383c54771c7003378a50191e9efe9`, Apache-2.0. Official repository metadata reports a 23,782,494,032-byte BF16 transformer plus 9,524,648,584-byte T5 encoder, 246,144,352-byte CLIP encoder, and 167,666,902-byte VAE, which does not leave safe activation/allocator headroom on one 24-GB card without offload or quantization.
+
 ## API shape
 
 - OpenAI official documentation: [Migrate to the Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses), [Create chat completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).

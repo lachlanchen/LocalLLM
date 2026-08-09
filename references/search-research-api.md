@@ -7,12 +7,15 @@ to discover or invoke tools reliably on its own.
 ## Boundary and base URL
 
 These management routes use `http://127.0.0.1:8008/api/...`; they are separate
-from the OpenAI-compatible `/v1/*` surface. `LOCALLLM_API_KEY` does **not**
-authenticate `/api/*`. They rely on the fixed loopback peer restriction plus
-browser origin/fetch-site checks, so any native process in the same host network
-namespace can call them. Do not proxy or tunnel port 8008 without first adding
-authentication and authorization. See [OpenAI API compatibility](openai-api-compatibility.md)
-for the complete gateway boundary.
+from the OpenAI-compatible `/v1/*` surface. Search, Research, conversations,
+grounded Chat, and Agent routes do **not** consult `LOCALLLM_API_KEY`. Every
+image job/output read and mutation requires it; only `GET /api/images/status`
+is loopback-public. Every route also relies on the fixed loopback peer
+restriction plus browser origin/fetch-site checks, so a native same-host process
+can still call the ungated routes. Do not proxy or tunnel port 8008 without first
+adding complete authentication and authorization. See
+[OpenAI API compatibility](openai-api-compatibility.md) for the complete gateway
+boundary.
 
 ## Provider federation
 
@@ -95,7 +98,9 @@ provider health check; per-request diagnostics show actual success or failure.
 
 `query` is 3–800 characters, `limit` is 1–30 and is also capped by
 `LOCALLLM_SEARCH_MAX_RESULTS`, and `mode` is `web`, `papers`, or `both`. The
-response contains ranked `sources`,
+provider-bound copy of `query` applies the same URL/URI and local-path redaction
+used by Chat and Deep Research; the original URL path, credentials, query, and
+fragment are never sent to a provider. The response contains ranked `sources`,
 per-provider diagnostics, and non-fatal warnings. Every source includes its provider
 set, evidence kind, authors, publication metadata, DOI, provider citation count,
 deterministic score, originating query, and provenance records. Provenance includes
@@ -129,6 +134,13 @@ variants and an up-to-6, up-to-12, or up-to-20 source budget, capped by
 `LOCALLLM_SEARCH_MAX_RESULTS`. Task responses expose `mode`, `depth`,
 `max_sources`, provider diagnostics/errors, progress, normalized sources, and the
 final report.
+
+Query variants are derived from a redacted planning copy of the question. URL
+and URI credentials, paths, query strings, and fragments are removed; a bounded
+hostname or authority label may remain, and local filesystem paths become the
+inert phrase `local path`. DOI identifiers are preserved for scholarly search.
+The original question remains in the private saved task record, so this is an
+outbound-query control rather than a local data-erasure feature.
 
 The manager admits at most three queued/running task runners and executes one
 research pipeline at a time to avoid competing for the local GPUs. A fourth
@@ -216,36 +228,73 @@ silently pretending the search was complete.
 
 ## Grounded chat stream
 
-`POST /api/agent/chat` is the web application's deterministic search-then-chat
-route. It is separate from the OpenAI-compatible `/v1/*` surface. A typical
+`POST /api/agent/chat` is the web application's bounded adaptive
+search-then-chat route. It is separate from the OpenAI-compatible `/v1/*`
+surface. A typical
 request is:
 
 ```json
 {
   "messages": [{"role": "user", "content": "Compare current RAG citation methods"}],
   "model": "localllm-fast",
-  "mode": "all",
+  "mode": "auto",
   "limit": 12,
   "temperature": 0.35,
   "max_tokens": 2048
 }
 ```
 
-`mode` is `local`, `web`, `papers`, or `all`; `all` maps to the broker's
-`both` lane. Non-local modes search before generation, number the evidence,
-insert it as an explicitly untrusted internal message, and fail closed without
-calling the model when no public evidence survives validation. Grounded chat packs
-provider snippets/abstracts; unlike Deep Research, it does not fetch the result
-pages. The stream uses named Server-Sent Events:
+`mode` is `auto`, `local`, `web`, `papers`, or `all`. `auto` is the bundled UI
+default and uses a deterministic local-first router over the latest user turn.
+It remains local unless that turn explicitly asks for current/fresh/verified web
+information, scholarly literature, or both; model size does not control this
+decision. `local` always bypasses the query planner and every search provider.
+The explicit `web`, `papers`, and `all` values override Auto. A pasted URL-shaped
+token is an Auto Web signal, while a DOI is a Papers signal. Local filesystem
+paths and dotted source/package/version tokens such as `package.json` and
+`v1.2.3` do not trigger general web search by themselves.
+
+For every resolved non-local request, the routed local model receives only the
+current question—not the saved transcript—and returns a
+JSON-schema-constrained plan of one to three passive queries. Web plans target
+general public pages, Papers plans use scholarly metadata terms, and All requires
+both lanes. Planner output is untrusted: query count and length are capped,
+extra/tool fields and URLs are rejected, and unrelated or malformed output falls
+back to deterministic language-aware variants. Before Chat's local planner
+receives the question—and before either Chat or Deep Research sends a provider
+query—URL/URI credentials, path, query, and fragment material is removed. Only
+a bounded inert hostname or authority label may remain, and any model plan that
+reproduces a removed term is rejected. The fallback preserves DOI identifiers
+and the question language, including Chinese, Japanese, Korean, Arabic,
+Cyrillic, and several common Latin-language patterns. This does not redact the
+locally persisted original chat turn.
+
+If a routed search request is an unresolved follow-up such as “What about its
+latest release?”, the stream asks the user to name the model, project, device,
+paper, or organization and stops before planner, provider, or answer-model calls.
+This prevents a guess from becoming an unrelated external query.
+
+Validated variants run with a concurrency cap of two, a per-variant deadline, and
+an overall retrieval deadline. Results are merged across query and provider
+provenance, deduplicated by DOI/canonical URL, reranked against the original user
+question, and lane-balanced for All mode. A failed variant is non-fatal when another
+variant returns evidence. Provider diagnostics aggregate attempts, successful
+attempts, queries, result counts, duration, and `healthy`/`partial`/`unavailable`
+state without exposing raw connector exception strings. The final evidence is
+numbered, inserted as an explicitly untrusted internal message, and the request
+fails closed without synthesis when no public evidence survives validation.
+Grounded chat packs provider snippets/abstracts; unlike Deep Research, it does not
+fetch result pages. The stream uses named Server-Sent Events:
 
 | Event | Payload |
 | --- | --- |
-| `status` | stage, operator-readable message, and optional resolved model/query metadata |
+| `status` | `preparing`, Auto `routing`, optional `clarifying`, `planning`, `planned`, `searching`, `ranking`, and `generating` stages, including the resolved mode and bounded query/lane plan where relevant |
+| `clarification` | a typed unresolved-reference reason, visible question, and resolved search mode; no external retrieval follows |
 | `source` | one normalized, validated public source object |
 | `warning` | a sanitized provider or citation warning |
 | `reasoning` | optional model reasoning text when the runtime exposes it |
 | `delta` | visible answer text |
-| `done` | resolved/requested model, mode, sources, provider diagnostics, and warnings |
+| `done` | resolved/requested model, requested mode, Auto `resolved_mode` when applicable, sources, aggregate provider diagnostics, accepted `search_plan`, optional clarification, warnings, and `answer_truncated: true` when the visible persistence cap was reached |
 | `error` | a sanitized terminal message |
 
 Messages use the `system`/`user`/`assistant` roles and the final turn must be a
@@ -255,6 +304,16 @@ and a 25 MiB encoded request body. Unknown request fields and unsupported conten
 part shapes are rejected rather than silently ignored.
 `limit` is 1–20, `temperature` is 0–2, and `max_tokens` is 1–8,192.
 
+The bundled Playground enforces the same 32,000-character limit before its
+mandatory pre-inference conversation save. If that save fails for validation,
+message/image quota, archive capacity, or local storage reasons, it makes no
+model request and restores the exact draft, attachment, and prior transcript.
+Visible assistant deltas are gracefully capped at 30,000 characters. At that
+boundary the stream emits a warning and a normal `done` event, allowing the UI
+to persist and resume the bounded answer below the 32,000-character store cap.
+Direct `/v1/*` proxy responses are not subject to this grounded-chat persistence
+cap.
+
 Structured image parts accept only base64 data URLs for PNG, JPEG, or WebP,
 validate file signatures and bounded raster dimensions, allow at most four
 images, 8 MiB per image, 16 MiB decoded total, 16,384 pixels on either axis, and
@@ -262,8 +321,9 @@ images, 8 MiB per image, 16 MiB decoded total, 16,384 pixels on either axis, and
 never fetched. Image turns retain an explicitly selected vision model or safely
 fall back to `localllm-vision` when a text-only model is requested.
 
-Grounded chat emits a status event immediately, performs retrieval when selected,
-and then streams answer deltas. Once response headers have been sent, a terminal
+Grounded chat emits a status event immediately, resolves Auto deterministically,
+plans and performs retrieval only when the resulting mode is non-local, and then
+streams answer deltas. Once response headers have been sent, a terminal
 failure is reported as an SSE `error` event on the existing HTTP 200 stream.
 At completion, the service checks visible text for missing or out-of-range
 citations and emits a warning when necessary. This is not paragraph coverage or

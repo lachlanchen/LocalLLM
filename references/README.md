@@ -8,7 +8,10 @@ These notes preserve the design decisions, source trail, operational boundaries,
 | [Model selection](model-selection.md) | choosing Q4/Q8, text/vision, one/two-GPU layouts, or context limits |
 | [llama.cpp runtime](llama-cpp.md) | building the pinned CUDA alternative runtime or serving a GGUF model on a loopback OpenAI-compatible API |
 | [Deep Research](deep-research.md) | understanding search, extraction, citations, limitations, and prompt-injection defenses |
-| [Search and Research API](search-research-api.md) | configuring federated web/paper providers or integrating quick search and deep-research tasks |
+| [Search and Research API](search-research-api.md) | configuring federated web/paper providers or understanding Auto/Local/Web/Papers/All grounded chat and deep-research tasks |
+| [Conversation history](conversation-history.md) | using resumable Playground sessions, SQLite revision safety, context compaction, GFM/KaTeX rendering, or history quotas |
+| [Agent capabilities](agent-capabilities.md) | using the mounted plan-preview panel or installing, enabling, and reviewing the confirmed offline Python sandbox |
+| [Optional image generation](image-generation.md) | installing or operating the mounted default-off Z-Image-Turbo lane, selecting its GPU, releasing warm weights, or reviewing job/output safety limits |
 | [Reverse engineering](reverse-engineering-workflow.md) | installing or operating Ghidra, OGhidra, PyGhidra-MCP, USB evidence, or clean-room workflows |
 | [USB packet evidence](usb-evidence-tooling.md) | building the version-pinned offline TShark image from a digest-pinned base, inspecting captures, or planning an operator-authorized usbmon capture |
 | [OpenAI API compatibility](openai-api-compatibility.md) | connecting OpenAI SDKs and determining which request fields are supported |
