@@ -52,8 +52,9 @@ const catalog: CatalogResponse = {
     'localllm-max': 'qwen3:30b-a3b-instruct-2507-q8_0',
     'localllm-vision': 'qwen3-vl:8b-instruct-q4_K_M',
     'localllm-vision-max': 'qwen3-vl:8b-instruct-q8_0',
+    'localllm-vision-xl': 'qwen3-vl:30b-a3b-instruct-q4_K_M',
   },
-  planned_download_gb: 89.2,
+  planned_download_gb: 109.2,
 }
 
 describe('local model availability', () => {

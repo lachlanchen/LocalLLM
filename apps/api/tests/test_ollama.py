@@ -37,7 +37,7 @@ async def test_get_model_percent_encodes_the_identifier(monkeypatch: pytest.Monk
         return httpx.Response(200, json={"id": "model"})
 
     install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
     response = await ollama.get_model("team/model:tag")
 
@@ -51,7 +51,7 @@ async def test_tags_surfaces_ollama_outage(monkeypatch: pytest.MonkeyPatch) -> N
         raise httpx.ConnectError("offline", request=request)
 
     clients = install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
     with pytest.raises(HTTPException) as exc_info:
         await ollama.tags()
@@ -71,7 +71,7 @@ async def test_proxy_json_closes_client_after_success(monkeypatch: pytest.Monkey
         return httpx.Response(200, json={"ok": True})
 
     clients = install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
     response = await ollama.proxy_json(
         "/v1/chat/completions", {"model": "localllm-fast", "messages": []}
@@ -91,7 +91,7 @@ async def test_proxy_json_closes_client_after_transport_error(
         raise httpx.ConnectError("offline", request=request)
 
     clients = install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
     with pytest.raises(HTTPException) as exc_info:
         await ollama.proxy_json("/v1/responses", {"model": "localllm-deep"})
@@ -109,11 +109,9 @@ async def test_proxy_stream_returns_upstream_headers_before_body(
         return httpx.Response(404, json={"error": "model not found"})
 
     clients = install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
-    stream = await ollama.proxy_stream(
-        "/v1/chat/completions", {"model": "missing", "stream": True}
-    )
+    stream = await ollama.proxy_stream("/v1/chat/completions", {"model": "missing", "stream": True})
 
     assert stream.response.status_code == 404
     assert not clients[0].is_closed
@@ -130,12 +128,10 @@ async def test_proxy_stream_closes_client_after_preflight_error(
         raise httpx.ConnectError("offline", request=request)
 
     clients = install_mock_transport(monkeypatch, handler)
-    ollama = OllamaClient(Settings(ollama_base_url="http://ollama.test"))
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
 
     with pytest.raises(HTTPException) as exc_info:
-        await ollama.proxy_stream(
-            "/v1/chat/completions", {"model": "missing", "stream": True}
-        )
+        await ollama.proxy_stream("/v1/chat/completions", {"model": "missing", "stream": True})
 
     assert exc_info.value.status_code == 503
     assert len(clients) == 1

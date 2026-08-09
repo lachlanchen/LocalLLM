@@ -1,13 +1,13 @@
 # Primary-source ledger
 
-Accessed 2026-08-08 unless noted otherwise.
+Accessed 2026-08-08 through 2026-08-09 unless noted otherwise.
 
 ## Models and runtime
 
-- Qwen cards matching the selected families/revisions: [Qwen3-4B GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [Qwen3-8B GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF), [Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen3-VL-8B-Instruct GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF).
+- Qwen cards matching the selected families/revisions: [Qwen3-4B GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [Qwen3-8B GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF), [Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), [Qwen3-VL-8B-Instruct GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF), and [Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct).
 - Ollama official catalogs for the selected GGUF tags: [Qwen3](https://ollama.com/library/qwen3/tags), [Qwen3-VL](https://ollama.com/library/qwen3-vl/tags).
 - Embeddings: [Ollama BGE-M3](https://ollama.com/library/bge-m3), [BAAI BGE-M3 model card](https://huggingface.co/BAAI/bge-m3).
-- Ollama documentation: [OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility), [Vision](https://docs.ollama.com/capabilities/vision), [API introduction](https://docs.ollama.com/api/introduction).
+- Ollama documentation: [OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility), [Vision](https://docs.ollama.com/capabilities/vision), [API introduction](https://docs.ollama.com/api/introduction), [multi-GPU behavior in the FAQ](https://docs.ollama.com/faq), and [GPU discovery/selection](https://docs.ollama.com/gpu).
 - Runtime pin: [Ollama v0.32.6](https://github.com/ollama/ollama/releases/tag/v0.32.6), Linux amd64 archive SHA-256 `dec2fa50d24e6868ca3c4c977d69d059399372105f951a9acc320a5a79aadcfc`; [scheduler source at that tag](https://github.com/ollama/ollama/blob/v0.32.6/server/sched.go).
 - Alternative runtime pin: [llama.cpp b10327](https://github.com/ggml-org/llama.cpp/releases/tag/b10327), commit [`69bf6437914596fbbc4caf09a7ac16f2acdd1a94`](https://github.com/ggml-org/llama.cpp/commit/69bf6437914596fbbc4caf09a7ac16f2acdd1a94); see its pinned [multi-GPU guide](https://github.com/ggml-org/llama.cpp/blob/69bf6437914596fbbc4caf09a7ac16f2acdd1a94/docs/multi-gpu.md).
 
@@ -16,6 +16,14 @@ Accessed 2026-08-08 unless noted otherwise.
 - OpenAI official documentation: [Migrate to the Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses), [Create chat completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 
 LocalLLM does not call hosted OpenAI models. These sources define the familiar client-facing shape used by the local gateway.
+
+## Search and scholarly metadata
+
+- Configured general-search adapters: [Brave Search API](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started), [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search), and [Serper](https://serper.dev/).
+- Structured keyless web adapters: the [MediaWiki Action API](https://www.mediawiki.org/wiki/API:Main_page) and its [search module](https://www.mediawiki.org/wiki/API:Search), GitHub's official [Search repositories REST endpoint](https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-repositories), and the public [Hacker News Algolia Search API](https://hn.algolia.com/api).
+- Explicit public-search fallback engines use the [DDGS project](https://github.com/deedy5/ddgs) with separately identified `duckduckgo`, `brave`, `yahoo`, and `mojeek` backends; this is not presented as an official API from those search engines.
+- Scholarly metadata: [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/), [Semantic Scholar Academic Graph API](https://api.semanticscholar.org/api-docs/graph), [Europe PMC REST API](https://europepmc.org/RestfulWebService), [arXiv API manual](https://info.arxiv.org/help/api/user-manual.html), and [OpenAlex API](https://developers.openalex.org/).
+- Optional Google Scholar results use the third-party [SerpAPI Google Scholar API](https://serpapi.com/google-scholar-api) under its own account, terms, and network boundary. This is not a direct Scholar API or a parity claim; LocalLLM does not scrape Google Scholar result pages.
 
 ## Reverse engineering
 

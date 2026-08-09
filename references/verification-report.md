@@ -1,20 +1,27 @@
 # LocalLLM verification report
 
-Verified on 2026-08-09. This report records observed behavior on this
-workstation. It is not a claim of cloud API parity or theoretical model
-capability.
+The baseline below was verified on 2026-08-09 before the NVIDIA reboot and
+before Vision XL expanded the curated catalog. Its observed measurements are
+preserved as historical evidence, not silently rewritten as current results.
+This report is not a claim of cloud API parity or theoretical model capability.
 
-> **NVIDIA reboot required:** every GPU result below was collected before a
+> **Historical pre-reboot condition:** every baseline GPU result below was collected before a
 > reboot while Ollama could use only one GPU. The loaded kernel module is
 > `595.71.05`, while the installed module and NVML library are `595.84`;
 > `nvidia-smi` therefore fails with a driver/library mismatch. PCI enumeration
-> shows two RTX 4090 D cards, but that does not establish healthy dual-GPU
-> inference. Stop GPU workloads and reboot before treating any result as a
-> dual-GPU measurement.
+> shows two RTX 4090 D cards, but those conditions did not establish healthy
+> dual-GPU inference. The original handoff therefore required a reboot before
+> any result could be treated as a dual-GPU measurement.
+
+The repository now declares a tenth underlying tag, Qwen3-VL 30B-A3B Q4, and a
+ninth stable alias. The dated addendum at the end records the separate
+post-reboot inventory and functional checks. Those observations do not rewrite
+or retroactively upgrade any baseline measurement below.
 
 ## Source and quality gates
 
-The checked application source was clean and synchronized with `origin/main`.
+At this baseline snapshot, the checked application source was clean and
+synchronized with `origin/main`.
 Local gates passed:
 
 - 69 backend tests plus Ruff;
@@ -27,7 +34,7 @@ script jobs. The final report commit and run are recorded in the release
 handoff rather than embedded here, so publishing this document does not create
 a self-referential commit ID.
 
-## Resolved nine-model manifest
+## Resolved nine-model baseline manifest
 
 Ollama tags are mutable registry names. These full manifest digests and byte
 sizes were observed locally on 2026-08-09 and should be recorded again after a
@@ -45,8 +52,8 @@ future pull.
 | `qwen3-vl:8b-instruct-q8_0` | `eff3eb825b322d4ffb85695e5a15cfe00b4d994d3c336f13dc867d8743b00245` | 9,830,285,285 | exact OCR result; 84.0 eval tok/s; 100% GPU |
 | `bge-m3:latest` | `7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab` | 1,157,672,605 | three 1,024-dimensional vectors verified |
 
-The catalog, pull script, and model guide agree on this six-text,
-two-vision, one-embedding set.
+At the time of this baseline snapshot, the catalog, pull script, and model guide
+agreed on this six-text, two-vision, one-embedding set.
 
 ## Provisional single-visible-GPU measurements
 
@@ -88,8 +95,8 @@ names. BGE-M3 scored the two local-AI phrases at 0.7792 cosine similarity and
 the unrelated fruit phrase at 0.3465. These are smoke observations, not an
 embedding benchmark.
 
-After all nine underlying tags were installed, the final SDK rerun returned
-17 model IDs: nine raw Ollama tags and eight stable LocalLLM aliases.
+After all nine baseline tags were installed, that snapshot's final SDK rerun
+returned 17 model IDs: nine raw Ollama tags and eight stable LocalLLM aliases.
 
 Thinking-capable Qwen3 tags may consume a low completion-token limit with
 hidden reasoning before visible text appears. The compatibility guide records
@@ -129,7 +136,7 @@ internal AllReduce fallback.
 
 ## Browser, binding, and service handoff
 
-Browser validation passed with nine model cards, three API code cards, no
+Baseline browser validation passed with nine model cards, three API code cards, no
 console errors, and a 390 px mobile document width matching the 390 px
 viewport. Live Vision Lab and Binary Studio results were inspected and saved
 under the ignored local evidence directory.
@@ -138,28 +145,83 @@ The active app, Ollama, PyGhidra-MCP, VNC, noVNC, and Chrome CDP listeners were
 all observed on loopback. The browser harness is not an authentication
 boundary and is stopped after the final service check.
 
-The installer enabled `localllm-ollama.service` and `localllm-api.service` in
-the user manager. Both units passed bounded readiness checks, and a deliberate
-restart changed both main PIDs while returning Ollama 0.32.6 and a healthy API.
+At the baseline snapshot, the installer enabled `localllm-ollama.service` and
+`localllm-api.service` in the user manager. Both units passed bounded readiness
+checks, and a deliberate restart changed both main PIDs while returning Ollama
+0.32.6 and a healthy API.
 This host's user manager cannot apply `ProtectKernelModules`; the templates
 therefore omit that redundant user-service directive while retaining
 `NoNewPrivileges`, `PrivateTmp`, control-group and kernel-tunable protection,
 and realtime/SUID restrictions.
 
-## Required post-reboot GPU verification
+## Post-reboot and Vision XL addendum — 2026-08-09
 
-Before replacing "provisional" or making any dual-GPU claim:
+These are separate post-reboot observations. They establish inventory,
+placement, and narrow functional smoke behavior; they are not throughput
+benchmarks and do not alter the historical figures above.
 
-1. Stop inference and model-pull workloads, then reboot; do not hot-unload the
-   NVIDIA modules.
-2. Confirm `nvidia-smi` succeeds and loaded kernel, installed module, and NVML
-   versions match.
-3. Confirm both RTX 4090 D cards and approximately 24 GB VRAM per card.
-4. Confirm Ollama sees both GPUs. Set `OLLAMA_SCHED_SPREAD=1` on the server
-   process only for an intentional two-card test.
-5. Rerun placement plus single-/two-card measurements before publishing a
-   performance comparison.
+### GPU and expanded API inventory
 
-Until those checks pass, this report establishes the local source, API,
-browser, model, and reverse-engineering toolchain behavior plus provisional
-one-visible-GPU performance only.
+- `nvidia-smi` returned two NVIDIA GeForce RTX 4090 D cards, each with
+  24,564 MiB total memory.
+- Ollama's startup inventory reported both CUDA devices at PCI IDs
+  `0000:01:00.0` and `0000:09:00.0`.
+- The installed catalog contained ten raw Ollama tags and nine stable aliases.
+  `GET /v1/models` consequently returned 19 IDs, and the curated catalog total
+  was 109.2 GB before filesystem overhead.
+
+### Qwen3 30B-A3B text Q8 across both cards
+
+The tested tag was `qwen3:30b-a3b-instruct-2507-q8_0`, resolved digest
+`528dfe43328ba6235a38e89f6e8ead082a70eda6b45bcae9bbdeba0f38ac3f9b`.
+While it was loaded at context 4,096, Ollama `/api/ps` reported
+`size_vram` 32,793,375,538 and 100% GPU placement. The Ollama process occupied
+16,526 MiB on GPU 0 and 15,562 MiB on GPU 1. The controlled no-thinking smoke
+request returned the exact visible text `DUAL-GPU-READY`.
+
+### Qwen3-VL 30B-A3B Q4 modest-context placement
+
+The Vision XL tag `qwen3-vl:30b-a3b-instruct-q4_K_M` resolved to digest
+`c871fc73fabc5516500b70a298ea25fd44a6a23d5cffc46c63b50302543e3915`.
+While loaded, `/api/ps` reported `size_vram` 19,256,175,491 and 100% GPU
+placement on GPU 1; `nvidia-smi` showed approximately 20,246 MiB of process
+memory there. In the screenshot smoke response, the model identified the page
+as Playground, reproduced the visible headline, described the three workspace
+cards, and identified the model selector.
+
+### Final self-contained service checks
+
+The installed user units passed their bounded restart and readiness checks.
+The Ollama unit recorded both distinct CUDA PCI IDs and rendered these active
+controls: `OLLAMA_CONTEXT_LENGTH=65536`, `OLLAMA_NO_CLOUD=1`, two loaded models
+at most, a 32-request queue, and one parallel request per model. Both units are
+enabled, and user lingering is enabled so they can run without an interactive
+shell.
+
+At the 65,536-token service context, Vision XL reported `size_vram`
+28,248,742,296 and 100 percent GPU placement. Its runner occupied 15,860 MiB on
+GPU 0 and 13,344 MiB on GPU 1, establishing automatic two-card placement for
+this larger context. Through the integrated `/api/agent/chat` image path it
+read the current screenshot as `CONTROL ROOM`, reproduced `Think locally.
+Build freely.`, and counted three large suggestion cards.
+
+The official OpenAI Python SDK 1.109.1 passed all final probes with 19 model
+IDs: non-streaming and streaming Chat Completions, Responses, a forced function
+call with arguments 7 and 6, JSON mode, three 1,024-dimensional BGE-M3 vectors,
+and a Vision XL data-URL image. The keyless live federation returned eight web
+results using structured APIs plus a bounded Yahoo/DDGS worker, and eight paper
+results while exposing a Semantic Scholar HTTP 429 as a non-fatal diagnostic.
+Grounded 4B Web chat returned a visible cited answer.
+
+A live Quick Papers task driven by the 4B Q4 alias retained three validated
+public sources. When both model synthesis attempts violated the strict citation
+dialect, it completed at 100 percent with the explicit evidence-inventory-only
+fallback and canonical source list instead of losing the evidence or inventing
+a conclusion.
+
+Final local source gates passed with 191 backend tests plus Ruff and lockfile
+checks; 50 frontend tests, TypeScript lint, and the production build; shell
+syntax, GPU-readiness fixtures, Python compilation, and `git diff --check`.
+The final visible browser gate rendered ten installed model cards and three API
+cards with no console or page errors; its 390 px document width exactly matched
+the 390 px mobile viewport.

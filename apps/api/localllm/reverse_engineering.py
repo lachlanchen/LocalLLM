@@ -20,13 +20,78 @@ MAX_BINARY_SIZE = 64 * 1024 * 1024
 MAX_UPLOAD_REQUEST_SIZE = MAX_BINARY_SIZE + 1024 * 1024
 MAX_TOOL_OUTPUT = 2 * 1024 * 1024
 MAX_DISPLAY_STRINGS = 800
+MAX_REVERSE_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_REVERSE_ARTIFACTS = 256
 USB_EVIDENCE_IMAGE = "localllm/usb-evidence:ubuntu24.04-20260808"
 _INSPECTION_LIMIT = asyncio.Semaphore(2)
+_ARCHIVE_QUOTA_LOCK = asyncio.Lock()
+_ARCHIVE_RESERVED_BYTES = 0
+_ARCHIVE_RESERVED_ARTIFACTS = 0
+
+
+async def _reserve_archive_capacity(directory: Path) -> None:
+    global _ARCHIVE_RESERVED_ARTIFACTS, _ARCHIVE_RESERVED_BYTES  # noqa: PLW0603
+
+    async with _ARCHIVE_QUOTA_LOCK:
+        artifact_ids: set[str] = set()
+        total_bytes = 0
+        try:
+            for path in directory.iterdir():
+                if path.name.startswith(".") or not path.is_file():
+                    continue
+                total_bytes += path.stat().st_size
+                match = re.match(r"^([0-9a-f]{20})(?:-|\.json$)", path.name)
+                if match:
+                    artifact_ids.add(match.group(1))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=507, detail="Inspection archive capacity could not be verified"
+            ) from exc
+        if (
+            len(artifact_ids) + _ARCHIVE_RESERVED_ARTIFACTS >= MAX_REVERSE_ARTIFACTS
+            or total_bytes + _ARCHIVE_RESERVED_BYTES + MAX_BINARY_SIZE > MAX_REVERSE_ARCHIVE_BYTES
+        ):
+            raise HTTPException(
+                status_code=507,
+                detail=(
+                    "Inspection archive quota reached; delete older local artifacts "
+                    "before uploading another binary"
+                ),
+            )
+        _ARCHIVE_RESERVED_ARTIFACTS += 1
+        _ARCHIVE_RESERVED_BYTES += MAX_BINARY_SIZE
+
+
+async def _release_archive_capacity() -> None:
+    global _ARCHIVE_RESERVED_ARTIFACTS, _ARCHIVE_RESERVED_BYTES  # noqa: PLW0603
+
+    async with _ARCHIVE_QUOTA_LOCK:
+        _ARCHIVE_RESERVED_ARTIFACTS = max(0, _ARCHIVE_RESERVED_ARTIFACTS - 1)
+        _ARCHIVE_RESERVED_BYTES = max(0, _ARCHIVE_RESERVED_BYTES - MAX_BINARY_SIZE)
 
 
 async def _exec(
     *args: str, timeout: float = 30.0, max_output: int = MAX_TOOL_OUTPUT
 ) -> tuple[int, str, bool]:
+    async def terminate_and_reap(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            await process.wait()
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            await process.wait()
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+
     process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
@@ -54,14 +119,18 @@ async def _exec(
         return process.returncode or 0, output.decode(errors="replace"), truncated
     except FileNotFoundError as exc:
         return 127, str(exc), False
-    except (TimeoutError, asyncio.TimeoutError):
-        if process is not None and process.returncode is None:
-            process.terminate()
+    except asyncio.CancelledError:
+        if process is not None:
+            cleanup = asyncio.create_task(terminate_and_reap(process))
             try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # A second cancellation must not orphan the already-started child cleanup.
+                await asyncio.shield(cleanup)
+        raise
+    except (TimeoutError, asyncio.TimeoutError):
+        if process is not None:
+            await terminate_and_reap(process)
         return 124, f"Command timed out after {timeout:g} seconds", True
 
 
@@ -76,6 +145,7 @@ async def inspect_upload(upload: UploadFile, settings: Settings) -> dict[str, An
     metadata_pending = directory / f".{artifact_id}.json.pending"
     digest = hashlib.sha256()
     total = 0
+    await _reserve_archive_capacity(directory)
     try:
         async with _INSPECTION_LIMIT:
             with target.open("wb") as output:
@@ -115,6 +185,8 @@ async def inspect_upload(upload: UploadFile, settings: Settings) -> dict[str, An
         metadata.unlink(missing_ok=True)
         target.unlink(missing_ok=True)
         raise
+    finally:
+        await _release_archive_capacity()
 
 
 async def delete_inspection(artifact_id: str, settings: Settings) -> dict[str, Any]:
@@ -167,11 +239,17 @@ async def ai_triage(metadata: dict[str, Any], model: str, settings: Settings) ->
                         {"role": "user", "content": prompt},
                     ],
                     "stream": False,
+                    "think": False,
                     "options": {"temperature": 0.1, "num_ctx": 32768},
                 },
             )
             response.raise_for_status()
-            return response.json().get("message", {}).get("content", "")
+            content = response.json().get("message", {}).get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                raise HTTPException(
+                    status_code=502, detail="Local model returned no visible triage analysis"
+                )
+            return content.strip()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail=f"Local model unavailable: {exc}") from exc
 

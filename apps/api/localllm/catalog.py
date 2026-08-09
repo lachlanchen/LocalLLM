@@ -66,7 +66,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "context": 262144,
         "modalities": ["text", "tools"],
         "tier": "Deep+",
-        "role": "Maximum local text fidelity across both GPUs",
+        "role": "Maximum text fidelity; requires aggregate dual-GPU capacity—verify placement",
         "recommended": False,
     },
     {
@@ -92,6 +92,17 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "recommended": False,
     },
     {
+        "id": "qwen3-vl:30b-a3b-instruct-q4_K_M",
+        "family": "Qwen3-VL 30B-A3B",
+        "quantization": "Q4_K_M",
+        "size_gb": 20.0,
+        "context": 262144,
+        "modalities": ["text", "image", "tools"],
+        "tier": "Vision XL",
+        "role": "Large multimodal research, dense diagrams, and detailed visual analysis",
+        "recommended": False,
+    },
+    {
         "id": "bge-m3:latest",
         "family": "BGE-M3 567M",
         "quantization": "F16",
@@ -112,6 +123,7 @@ MODEL_ALIASES = {
     "localllm-max": "qwen3:30b-a3b-instruct-2507-q8_0",
     "localllm-vision": "qwen3-vl:8b-instruct-q4_K_M",
     "localllm-vision-max": "qwen3-vl:8b-instruct-q8_0",
+    "localllm-vision-xl": "qwen3-vl:30b-a3b-instruct-q4_K_M",
     "localllm-embed": "bge-m3:latest",
 }
 

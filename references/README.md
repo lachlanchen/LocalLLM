@@ -4,10 +4,11 @@ These notes preserve the design decisions, source trail, operational boundaries,
 
 | Document | Use it when… |
 | --- | --- |
-| [Verification report](verification-report.md) | reviewing the resolved nine-model manifest, provisional pre-reboot measurements, service handoff, and final local quality evidence |
+| [Verification report](verification-report.md) | reviewing the historical nine-model/pre-reboot baseline and the completed 2026-08-09 post-reboot service, dual-GPU, and Vision XL addendum |
 | [Model selection](model-selection.md) | choosing Q4/Q8, text/vision, one/two-GPU layouts, or context limits |
 | [llama.cpp runtime](llama-cpp.md) | building the pinned CUDA alternative runtime or serving a GGUF model on a loopback OpenAI-compatible API |
 | [Deep Research](deep-research.md) | understanding search, extraction, citations, limitations, and prompt-injection defenses |
+| [Search and Research API](search-research-api.md) | configuring federated web/paper providers or integrating quick search and deep-research tasks |
 | [Reverse engineering](reverse-engineering-workflow.md) | installing or operating Ghidra, OGhidra, PyGhidra-MCP, USB evidence, or clean-room workflows |
 | [USB packet evidence](usb-evidence-tooling.md) | building the version-pinned offline TShark image from a digest-pinned base, inspecting captures, or planning an operator-authorized usbmon capture |
 | [OpenAI API compatibility](openai-api-compatibility.md) | connecting OpenAI SDKs and determining which request fields are supported |

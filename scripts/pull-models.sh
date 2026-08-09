@@ -16,6 +16,7 @@ text_models=(
 vision_models=(
   qwen3-vl:8b-instruct-q4_K_M
   qwen3-vl:8b-instruct-q8_0
+  qwen3-vl:30b-a3b-instruct-q4_K_M
 )
 embedding_models=(
   bge-m3:latest
@@ -34,6 +35,7 @@ all_models=(
   qwen3:30b-a3b-instruct-2507-q4_K_M
   qwen3:8b-q8_0
   qwen3-vl:8b-instruct-q8_0
+  qwen3-vl:30b-a3b-instruct-q4_K_M
   qwen3:30b-a3b-instruct-2507-q8_0
   bge-m3:latest
 )

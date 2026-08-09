@@ -49,12 +49,89 @@ export interface ChatMessage {
   image?: string
   pending?: boolean
   model?: string
+  mode?: ChatMode
+  sources?: ResearchSource[]
+  activity?: string[]
+  warning?: string
 }
+
+export type ChatMode = 'local' | 'web' | 'papers' | 'all'
+export type SearchMode = 'web' | 'papers' | 'both'
+export type ResearchDepth = 'quick' | 'standard' | 'deep'
 
 export interface ResearchSource {
   title: string
   url: string
   snippet: string
+  provider?: string
+  providers?: string[]
+  kind?: 'web' | 'paper' | string
+  authors?: string[]
+  year?: number | null
+  published_date?: string | null
+  doi?: string | null
+  citation_count?: number | null
+  score?: number | null
+  query?: string
+  provenance?: SourceProvenance[]
+}
+
+export interface SourceProvenance {
+  provider: string
+  query: string
+  record_id: string | null
+  retrieved_at: string
+}
+
+export interface SearchProviderStatus {
+  name: string
+  kind: string
+  enabled: boolean
+  configured: boolean
+  requires_key: boolean
+  description: string
+}
+
+export interface SearchProviderRun {
+  name: string
+  kind: string
+  ok: boolean
+  result_count: number
+  duration_ms: number
+  error?: string
+}
+
+export interface SearchStatus {
+  providers: SearchProviderStatus[]
+  modes: SearchMode[]
+  limits: {
+    max_results: number
+    max_concurrency: number
+    provider_timeout_seconds: number
+  }
+}
+
+export interface SearchResponse {
+  query: string
+  mode: SearchMode
+  sources: ResearchSource[]
+  providers: SearchProviderRun[]
+  warnings: string[]
+}
+
+export interface AgentStatusEvent {
+  stage: string
+  message: string
+  model?: string
+}
+
+export interface AgentDoneEvent {
+  model: string
+  requested_model: string
+  mode: ChatMode
+  sources: ResearchSource[]
+  providers: SearchProviderRun[]
+  warnings: string[]
 }
 
 export interface ResearchTask {
@@ -62,10 +139,14 @@ export interface ResearchTask {
   question: string
   model: string
   status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled'
+  mode: SearchMode
+  depth: ResearchDepth
   stage: string
   progress: number
   queries: string[]
   sources: ResearchSource[]
+  providers: SearchProviderRun[]
+  provider_errors: string[]
   report: string
   error?: string
 }

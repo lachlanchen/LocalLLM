@@ -23,6 +23,7 @@ export const TEXT_MODEL_CHOICES: readonly ModelChoice[] = [
 export const VISION_MODEL_CHOICES: readonly ModelChoice[] = [
   { alias: 'localllm-vision', label: 'Qwen3-VL 8B · Q4' },
   { alias: 'localllm-vision-max', label: 'Qwen3-VL 8B · Q8' },
+  { alias: 'localllm-vision-xl', label: 'Qwen3-VL 30B · XL' },
 ]
 
 export function choicesFor(kind: ModelKind): readonly ModelChoice[] {

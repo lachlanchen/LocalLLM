@@ -89,7 +89,7 @@ def run() -> dict[str, object]:
         "title": "LocalLLM Studio",
         "workspaceStatus": "ready",
         "initialView": "chat",
-        "modelCards": 9,
+        "modelCards": 10,
         "apiCodeCards": 3,
         "sendEnabledAfterTyping": True,
     }

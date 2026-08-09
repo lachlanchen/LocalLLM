@@ -1,22 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import math
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal, TypeVar
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .catalog import MODEL_ALIASES, MODEL_CATALOG, resolve_model
 from .config import Settings, get_settings
+from .grounded_chat import router as grounded_chat_router
 from .mcp_bridge import investigate_with_mcp, mcp_status
 from .ollama import OllamaClient, OllamaStream
 from .research import ResearchCapacityError, ResearchManager
@@ -30,21 +35,68 @@ from .reverse_engineering import (
 from .system import find_project_root, gpu_status, storage_status, tool_status
 
 
-class ModelAction(BaseModel):
-    model: str
+class StrictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class ResearchRequest(BaseModel):
+class ModelAction(StrictRequest):
+    model: str = Field(min_length=1, max_length=200)
+
+
+class ResearchRequest(StrictRequest):
     question: str = Field(min_length=8, max_length=4000)
     model: str = "localllm-deep"
+    mode: Literal["web", "papers", "both"] = "both"
+    depth: Literal["quick", "standard", "deep"] = "standard"
 
 
-class TriageRequest(BaseModel):
+class SearchRequest(StrictRequest):
+    query: str = Field(min_length=3, max_length=800)
+    mode: Literal["web", "papers", "both"] = "both"
+    limit: int = Field(default=12, ge=1, le=30)
+
+
+class SearchSourceResponse(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    provider: str
+    providers: list[str]
+    kind: str
+    authors: list[str]
+    year: int | None
+    published_date: str | None
+    doi: str | None
+    citation_count: int | None
+    score: float
+    query: str
+    provenance: list[dict[str, Any]]
+
+
+class SearchProviderResponse(BaseModel):
+    name: str
+    kind: str
+    ok: bool
+    result_count: int
+    duration_ms: int
+    error: str | None = None
+    queries: list[str]
+
+
+class SearchResponse(BaseModel):
+    query: str
+    mode: Literal["web", "papers", "both"]
+    sources: list[SearchSourceResponse]
+    providers: list[SearchProviderResponse]
+    warnings: list[str]
+
+
+class TriageRequest(StrictRequest):
     metadata: dict[str, Any]
-    model: str = "localllm-deep"
+    model: str = Field(default="localllm-deep", min_length=1, max_length=200)
 
 
-class McpInvestigationRequest(BaseModel):
+class McpInvestigationRequest(StrictRequest):
     binary_name: str = Field(min_length=1, max_length=500)
     question: str = Field(min_length=8, max_length=4000)
     model: str = "localllm-deep"
@@ -52,6 +104,196 @@ class McpInvestigationRequest(BaseModel):
 
 class OpenAIAuthenticationError(Exception):
     """Authentication failure that must retain an OpenAI-compatible body."""
+
+
+class _RequestBodyTooLarge(BaseException):
+    """Private receive-channel sentinel that inner exception middleware cannot consume."""
+
+
+RequestModel = TypeVar("RequestModel", bound=BaseModel)
+MAX_SEARCH_JSON_BYTES = 16 * 1024
+MAX_RESEARCH_JSON_BYTES = 32 * 1024
+MAX_OPENAI_JSON_BYTES = 25 * 1024 * 1024
+REQUEST_BODY_LIMITS = {
+    "/api/agent/chat": MAX_OPENAI_JSON_BYTES,
+    "/api/chat/completions": MAX_OPENAI_JSON_BYTES,
+    "/api/models/pull": 8 * 1024,
+    "/api/re/inspect": MAX_UPLOAD_REQUEST_SIZE,
+    "/api/re/mcp/investigate": 32 * 1024,
+    "/api/re/triage": 4 * 1024 * 1024,
+    "/api/research": MAX_RESEARCH_JSON_BYTES,
+    "/api/search": MAX_SEARCH_JSON_BYTES,
+    "/v1/chat/completions": MAX_OPENAI_JSON_BYTES,
+    "/v1/embeddings": 8 * 1024 * 1024,
+    "/v1/responses": MAX_OPENAI_JSON_BYTES,
+}
+
+
+class RequestBodyLimitMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._body_slots = asyncio.Semaphore(4)
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send, status: int) -> None:
+        path = str(scope.get("path", ""))
+        if path.startswith("/v1/"):
+            response = JSONResponse(
+                status_code=status,
+                content={
+                    "error": {
+                        "message": "Request body exceeds the endpoint size limit",
+                        "type": "invalid_request_error",
+                        "param": None,
+                        "code": "request_too_large",
+                    }
+                },
+            )
+        else:
+            response = JSONResponse(
+                status_code=status,
+                content={"detail": "Request body exceeds the endpoint size limit"},
+            )
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") not in {
+            "POST",
+            "PUT",
+            "PATCH",
+        }:
+            await self.app(scope, receive, send)
+            return
+        limit = REQUEST_BODY_LIMITS.get(str(scope.get("path", "")))
+        if limit is None:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                declared_length = int(declared)
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400, content={"detail": "Invalid Content-Length"}
+                )
+                await response(scope, receive, send)
+                return
+            if declared_length < 0:
+                response = JSONResponse(
+                    status_code=400, content={"detail": "Invalid Content-Length"}
+                )
+                await response(scope, receive, send)
+                return
+            if declared_length > limit:
+                await self._reject(scope, receive, send, 413)
+                return
+
+        received = 0
+        slot_acquired = False
+        slot_released = False
+        response_started = False
+
+        def release_slot() -> None:
+            nonlocal slot_released
+            if slot_acquired and not slot_released:
+                self._body_slots.release()
+                slot_released = True
+
+        async def limited_receive() -> Message:
+            nonlocal received, slot_acquired
+            if not slot_acquired:
+                await self._body_slots.acquire()
+                slot_acquired = True
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                release_slot()
+                return message
+            if message.get("type") != "http.request":
+                return message
+            chunk = message.get("body", b"")
+            if received + len(chunk) > limit:
+                release_slot()
+                raise _RequestBodyTooLarge
+            received += len(chunk)
+            if not message.get("more_body", False):
+                release_slot()
+            return message
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracked_send)
+        except _RequestBodyTooLarge:
+            if not response_started:
+                await self._reject(scope, receive, send, 413)
+        finally:
+            release_slot()
+
+
+def _bounded_json_integer(value: str) -> int:
+    if len(value) > 256:
+        raise ValueError("JSON integer is too long")
+    return int(value)
+
+
+def _bounded_json_float(value: str) -> float:
+    if len(value) > 256:
+        raise ValueError("JSON number is too long")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("Non-finite JSON numbers are not allowed")
+    return parsed
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"Non-finite JSON number {value!r} is not allowed")
+
+
+async def _bounded_json_object(request: Request, max_bytes: int) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(status_code=413, detail="JSON request exceeds the size limit")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > max_bytes:
+            raise HTTPException(status_code=413, detail="JSON request exceeds the size limit")
+        body.extend(chunk)
+    try:
+        decoded = json.loads(
+            body,
+            parse_int=_bounded_json_integer,
+            parse_float=_bounded_json_float,
+            parse_constant=_reject_nonfinite_json,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object")
+    return decoded
+
+
+async def _bounded_json_model(
+    request: Request,
+    model_type: type[RequestModel],
+    max_bytes: int,
+) -> RequestModel:
+    decoded = await _bounded_json_object(request, max_bytes)
+    try:
+        return model_type.model_validate(decoded)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        raise HTTPException(status_code=422, detail=errors[:20]) from exc
 
 
 @asynccontextmanager
@@ -76,6 +318,7 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 settings = get_settings()
 loopback_origins = [
     f"http://127.0.0.1:{settings.port}",
@@ -133,6 +376,9 @@ async def browser_security_boundary(request: Request, call_next):
         "frame-ancestors 'none'"
     )
     return response
+
+
+app.include_router(grounded_chat_router)
 
 
 def get_ollama(request: Request) -> OllamaClient:
@@ -193,6 +439,14 @@ async def openai_authentication_error(
     return response
 
 
+@app.exception_handler(RequestValidationError)
+async def sanitized_request_validation_error(
+    _request: Request, exc: RequestValidationError
+) -> Response:
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    return JSONResponse(status_code=422, content={"detail": errors[:20]})
+
+
 def _openai_upstream_error(response: httpx.Response) -> Response:
     """Normalize an upstream failure without encoding its JSON body as a string."""
 
@@ -209,9 +463,7 @@ def _openai_upstream_error(response: httpx.Response) -> Response:
             normalized.setdefault("type", "upstream_error")
             normalized.setdefault("param", None)
             normalized.setdefault("code", None)
-            return JSONResponse(
-                status_code=response.status_code, content={"error": normalized}
-            )
+            return JSONResponse(status_code=response.status_code, content={"error": normalized})
         if isinstance(error, str):
             return _openai_error(response.status_code, error)
         detail = payload.get("detail")
@@ -297,8 +549,9 @@ async def model_catalog(ollama: OllamaClient = Depends(get_ollama)) -> dict[str,
 
 @app.post("/api/models/pull")
 async def pull_model(
-    action: ModelAction, ollama: OllamaClient = Depends(get_ollama)
+    request: Request, ollama: OllamaClient = Depends(get_ollama)
 ) -> StreamingResponse:
+    action = await _bounded_json_model(request, ModelAction, 8 * 1024)
     allowed = {model["id"] for model in MODEL_CATALOG}
     resolved = resolve_model(action.model)
     if resolved not in allowed:
@@ -307,18 +560,41 @@ async def pull_model(
 
 
 @app.post("/api/chat/completions")
-async def app_chat(
-    payload: dict[str, Any] = Body(...), ollama: OllamaClient = Depends(get_ollama)
-) -> Response:
+async def app_chat(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
+    payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
     return await _proxy_openai("/v1/chat/completions", payload, ollama)
+
+
+@app.get("/api/search/status")
+async def search_status(manager: ResearchManager = Depends(get_research)) -> dict[str, Any]:
+    """Describe search capabilities without exposing provider credentials."""
+
+    return manager.provider_status()
+
+
+@app.post("/api/search", response_model=SearchResponse)
+async def quick_search(
+    request: Request, manager: ResearchManager = Depends(get_research)
+) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, SearchRequest, MAX_SEARCH_JSON_BYTES)
+    outcome = await manager.quick_search(payload.query, payload.mode, payload.limit)
+    return outcome.public_dict()
 
 
 @app.post("/api/research")
 async def create_research(
-    payload: ResearchRequest, manager: ResearchManager = Depends(get_research)
+    request: Request, manager: ResearchManager = Depends(get_research)
 ) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, ResearchRequest, MAX_RESEARCH_JSON_BYTES)
     try:
-        return manager.serialize(manager.create(payload.question, payload.model))
+        return manager.serialize(
+            manager.create(
+                payload.question,
+                payload.model,
+                mode=payload.mode,
+                depth=payload.depth,
+            )
+        )
     except ResearchCapacityError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
@@ -364,8 +640,9 @@ async def reverse_delete_inspection(
 
 @app.post("/api/re/triage")
 async def reverse_triage(
-    payload: TriageRequest, current: Settings = Depends(get_settings)
+    request: Request, current: Settings = Depends(get_settings)
 ) -> dict[str, str]:
+    payload = await _bounded_json_model(request, TriageRequest, 4 * 1024 * 1024)
     return {"analysis": await ai_triage(payload.metadata, payload.model, current)}
 
 
@@ -376,8 +653,9 @@ async def reverse_mcp_status(current: Settings = Depends(get_settings)) -> dict[
 
 @app.post("/api/re/mcp/investigate")
 async def reverse_mcp_investigate(
-    payload: McpInvestigationRequest, current: Settings = Depends(get_settings)
+    request: Request, current: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
+    payload = await _bounded_json_model(request, McpInvestigationRequest, 32 * 1024)
     return await investigate_with_mcp(
         payload.binary_name,
         payload.question,
@@ -441,22 +719,21 @@ async def _proxy_openai(endpoint: str, payload: dict[str, Any], ollama: OllamaCl
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(
-    payload: dict[str, Any] = Body(...), ollama: OllamaClient = Depends(get_ollama)
+    request: Request, ollama: OllamaClient = Depends(get_ollama)
 ) -> Response:
+    payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
     return await _proxy_openai("/v1/chat/completions", payload, ollama)
 
 
 @app.post("/v1/responses", dependencies=[Depends(require_api_key)])
-async def responses(
-    payload: dict[str, Any] = Body(...), ollama: OllamaClient = Depends(get_ollama)
-) -> Response:
+async def responses(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
+    payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
     return await _proxy_openai("/v1/responses", payload, ollama)
 
 
 @app.post("/v1/embeddings", dependencies=[Depends(require_api_key)])
-async def embeddings(
-    payload: dict[str, Any] = Body(...), ollama: OllamaClient = Depends(get_ollama)
-) -> Response:
+async def embeddings(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
+    payload = await _bounded_json_object(request, 8 * 1024 * 1024)
     return await _proxy_openai("/v1/embeddings", payload, ollama)
 
 

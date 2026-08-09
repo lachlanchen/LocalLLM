@@ -16,7 +16,7 @@ The application is useful before every model is downloaded: system diagnostics, 
 
 | Workspace | Purpose |
 | --- | --- |
-| Playground | Streaming local chat, code help, and optional image attachments |
+| Playground | Streaming local chat, selectable web/paper grounding, and optional image attachments |
 | Vision Lab | OCR, screenshot review, diagram reading, and visual question answering |
 | Deep Research | Multi-query web search, page extraction, cited synthesis, and uncertainty tracking |
 | Model Shelf | Curated Q4/Q8 tags, download progress, installed state, and stable aliases |
@@ -43,7 +43,8 @@ In a second terminal, pull the three practical daily models plus multilingual em
 scripts/pull-models.sh core
 ```
 
-Pull every requested Q4/Q8 comparison model plus embeddings (about 89 GB):
+Pull every requested Q4/Q8 comparison model, the 30B-A3B vision model, and
+embeddings (about 109 GB):
 
 ```bash
 scripts/pull-models.sh all
@@ -57,6 +58,7 @@ scripts/pull-models.sh all
 | Daily assistant | `qwen3:8b-q4_K_M` / `qwen3:8b-q8_0` | 5.2 / 8.9 GB | `localllm-fast`, `localllm-balanced` |
 | Research and RE | `qwen3:30b-a3b-instruct-2507-q4_K_M` / `...q8_0` | 19 / 32 GB | `localllm-deep`, `localllm-max` |
 | Vision and OCR | `qwen3-vl:8b-instruct-q4_K_M` / `...q8_0` | 6.1 / 9.8 GB | `localllm-vision`, `localllm-vision-max` |
+| Vision XL | `qwen3-vl:30b-a3b-instruct-q4_K_M` | 20 GB | `localllm-vision-xl` |
 | Retrieval and RAG | `bge-m3:latest` | 1.2 GB | `localllm-embed` |
 
 Q4_K_M is the normal lane: lower VRAM, faster startup, and more room for KV cache. Q8_0 remains available as a fidelity comparison. See [the model and hardware guide](references/model-selection.md) for context, resolved-digest guidance, and realistic expectations.
@@ -65,7 +67,16 @@ These are named Ollama registry tags, not immutable weight pins; `bge-m3:latest`
 
 ## OpenAI-compatible API
 
-The local base URL is `http://127.0.0.1:8008/v1`. Chat Completions, Responses, Models, and Embeddings are forwarded to the local Ollama runtime with LocalLLM aliases resolved at the gateway.
+The local base URL is `http://127.0.0.1:8008/v1`. Chat Completions,
+Responses, Models, and Embeddings are forwarded to Ollama with LocalLLM aliases
+resolved at the gateway. The upstream runtime is deliberately fixed to
+`http://127.0.0.1:11434`; configuration rejects a remote, credentialed, or
+alternate-port Ollama URL, and outbound proxy environment variables are not
+trusted for this connection.
+
+Encoded Chat Completions and Responses requests are capped at 25 MiB;
+Embeddings requests are capped at 8 MiB. The gateway enforces those limits for
+declared and chunked bodies before forwarding to Ollama.
 
 ```python
 from openai import OpenAI
@@ -83,6 +94,26 @@ print(response.output_text)
 ```
 
 OpenAI’s Responses API is broader than the locally implemented subset. The exact contract and limitations are documented in [OpenAI API compatibility](references/openai-api-compatibility.md).
+
+## Grounded chat and research
+
+Chat has four explicit evidence modes: **Local**, **Web**, **Papers**, and
+**All**. Retrieval is orchestrated by the server rather than delegated to
+model tool calling, so the 4B, 8B, and MoE models receive the same normalized
+evidence for a given broker response. Deep Research adds persistent jobs,
+multiple query angles, page extraction, a strict cited-report dialect, citation
+repair, cancellation, and Quick/Standard/Deep budgets.
+
+The keyless web fallback combines structured Wikipedia, GitHub repository, and
+Hacker News APIs with explicitly named DDGS engines for DuckDuckGo, Brave,
+Yahoo, and Mojeek. The keyless paper lane combines Crossref, Semantic Scholar
+at public limits, Europe PMC, and arXiv. Optional keys in `.env` add Brave,
+Tavily, Serper, OpenAlex, and Google Scholar results through SerpAPI. LocalLLM
+does not scrape Google Scholar HTML. Retrieval queries and public-page requests
+leave the machine; model inference remains local. Quick-search JSON is capped
+at 16 KiB, research creation at 32 KiB, and grounded-chat requests at 25 MiB.
+See the [provider and API guide](references/search-research-api.md) for
+configuration, response provenance, bounds, and failure behavior.
 
 ## Reverse-engineering toolchain
 
@@ -172,7 +203,7 @@ uv run --project apps/api --extra dev python scripts/browser-smoke.py
 scripts/launch-novnc.sh stop
 ```
 
-For a persistent local service, run `scripts/install-user-services.sh`. It installs two user-level systemd units; it does not require root.
+For a persistent local service, run `scripts/install-user-services.sh`. It installs two user-level systemd units; it does not require root. On a fixed dual-GPU workstation, set `LOCALLLM_EXPECTED_GPU_COUNT=2` in `.env` first. The installer renders the whitelisted GPU settings—including the practical 65,536-token default context—into the Ollama unit, disables Ollama cloud features, bounds loaded models/queue/parallelism, waits for both cards, and verifies Ollama's startup inventory. Rerun it after changing those settings.
 
 ## Privacy and safety
 
@@ -185,20 +216,36 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
   proxy or tunnel port 8008 without adding authentication and authorization.
 - The optional browser harness is a same-host test fixture, not an authentication boundary: Xvfb disables X access control, x11vnc is passwordless, and Chrome DevTools is unauthenticated. Never forward, proxy, or tunnel ports `5930`, `6130`, or `9470`, and stop the harness after use.
 - Browser API requests enforce an origin/fetch-site boundary, HTTP hosts are allowlisted, and the app emits a restrictive content-security policy plus anti-framing headers.
-- Model weights, prompts, uploads, research reports, runtime logs, and reverse-engineering projects live under ignored local directories.
-- Binary Studio never executes an uploaded binary. It enforces a 64 MB limit, bounds subprocess output and concurrency, stores artifacts privately, and provides an explicit local delete control.
+- LocalLLM does not persist Playground or Vision Lab threads; their current
+  state remains in browser memory. Research questions/reports and Binary Studio
+  uploads and metadata persist under `data/` until explicitly removed; model
+  weights and reverse-engineering projects use ignored project-local
+  directories. The research archive refuses new runs at 500 JSON files or
+  256 MiB. The inspection archive refuses new uploads at 256 artifact IDs or a
+  reserved two-GiB ceiling and returns HTTP 507 when capacity cannot be safely
+  verified; neither archive silently deletes older evidence.
+- User-service logs can be retained by systemd-journald outside the repository;
+  review the host's journal retention policy when prompts or filenames are
+  sensitive.
+- Binary Studio never executes an uploaded binary. It enforces a 64 MiB binary
+  limit inside a 65 MiB multipart request cap, bounds subprocess output and
+  concurrency, stores artifacts privately, and provides an explicit local
+  delete control. Its triage JSON is capped at 4 MiB and MCP-investigation JSON
+  at 32 KiB.
 - The web app exposes only 12 read-only PyGhidra-MCP tools to its investigator and blocks all eight discovered project/symbol mutation tools.
 - Binary strings and fetched webpages are treated as untrusted data, not model instructions.
 - AI reverse-engineering conclusions are hypotheses until supported by cross-references, captures, tests, or hardware behavior.
-- Web access is explicit and isolated to Deep Research. Chat and Vision do not silently search the internet.
+- Web access is explicit: it runs only in Chat's Web/Papers/All modes or in
+  Deep Research. Local chat and Vision Lab do not silently search the internet.
 
 ## Documentation map
 
 - [Reference index](references/README.md)
-- [Local verification report](references/verification-report.md)
+- [Historical verification baseline and completed post-reboot addendum](references/verification-report.md)
 - [Model selection and dual-4090 layout](references/model-selection.md)
 - [Pinned llama.cpp CUDA alternative](references/llama-cpp.md)
 - [Deep Research design](references/deep-research.md)
+- [Federated search and research API](references/search-research-api.md)
 - [Reverse-engineering workflow](references/reverse-engineering-workflow.md)
 - [USB packet-evidence tooling](references/usb-evidence-tooling.md)
 - [OpenAI-compatible API contract](references/openai-api-compatibility.md)

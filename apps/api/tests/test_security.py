@@ -15,9 +15,7 @@ def test_storage_status_has_nonnegative_values(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_system_command_timeout_terminates_and_reaps_child() -> None:
-    code, output = await _command(
-        "python3", "-c", "import time; time.sleep(30)", timeout=0.01
-    )
+    code, output = await _command("python3", "-c", "import time; time.sleep(30)", timeout=0.01)
 
     assert code == 124
     assert output == "timed out"

@@ -91,9 +91,7 @@ def test_catalog_and_openai_model_aliases() -> None:
         }
         assert unauthorized.headers["www-authenticate"] == "Bearer"
 
-        authorized = client.get(
-            "/v1/models", headers={"Authorization": "bearer local-dev-key"}
-        )
+        authorized = client.get("/v1/models", headers={"Authorization": "bearer local-dev-key"})
         assert authorized.status_code == 200
         ids = {model["id"] for model in authorized.json()["data"]}
         assert "qwen3:8b-q4_K_M" in ids
@@ -251,3 +249,83 @@ def test_responses_and_embeddings_contracts_are_forwarded() -> None:
         "/v1/responses",
         "/v1/embeddings",
     ]
+
+
+def test_openai_body_limit_preflights_with_openai_error_envelope() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/embeddings",
+            headers={
+                "Authorization": "Bearer local-dev-key",
+                "Content-Type": "application/json",
+                "Content-Length": str(9 * 1024 * 1024),
+            },
+            content=b"{}",
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"] == {
+        "message": "Request body exceeds the endpoint size limit",
+        "type": "invalid_request_error",
+        "param": None,
+        "code": "request_too_large",
+    }
+
+
+def test_management_body_limit_stops_chunked_payload_before_parsing() -> None:
+    def chunks():
+        yield b'{"model":"'
+        yield b"x" * (9 * 1024)
+        yield b'"}'
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/models/pull",
+            content=chunks(),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body exceeds the endpoint size limit"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/models/pull",
+        "/api/re/mcp/investigate",
+        "/api/re/triage",
+    ],
+)
+def test_management_json_rejects_nonfinite_numbers_without_echoing_input(path: str) -> None:
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            path,
+            content=b'{"model":NaN}',
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Request body must be valid JSON"}
+    assert "NaN" not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/chat/completions",
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/embeddings",
+    ],
+)
+def test_generic_json_routes_reject_overflowing_floats(path: str) -> None:
+    headers = {"Content-Type": "application/json"}
+    if path.startswith("/v1/"):
+        headers["Authorization"] = "Bearer local-dev-key"
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.app.state.ollama = FakeProxyOllama()
+        response = client.post(path, content=b'{"temperature":1e9999}', headers=headers)
+
+    assert response.status_code == 400
+    assert "1e9999" not in response.text

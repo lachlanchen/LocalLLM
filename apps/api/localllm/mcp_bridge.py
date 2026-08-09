@@ -108,9 +108,7 @@ async def mcp_status(settings: Settings) -> dict[str, Any]:
                     "tool_count": len(available),
                     "read_only_tools": sorted(available & READ_ONLY_MCP_TOOLS),
                     "mutation_tools_blocked": sorted(available - READ_ONLY_MCP_TOOLS),
-                    "binaries": binaries.get("programs", [])
-                    if isinstance(binaries, dict)
-                    else [],
+                    "binaries": binaries.get("programs", []) if isinstance(binaries, dict) else [],
                     "binding": "loopback-only",
                 }
     except Exception as exc:

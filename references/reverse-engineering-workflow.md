@@ -123,6 +123,36 @@ publish, port-forward, reverse-proxy, container-share, or tunnel their ports.
 Remote or multi-user operation requires an authenticated authorization layer
 that this project does not provide.
 
+Binary Studio's `/api/re/*` routes have the same management-API boundary: the
+LocalLLM API key does not authenticate them, and native same-host processes can
+call them. Browser origin/fetch-site checks add a browser boundary, not local
+process authorization. AI triage is sent only to the configuration-pinned local
+Ollama endpoint at `http://127.0.0.1:11434`; remote or credentialed Ollama URLs
+are rejected during application configuration.
+
+## Binary Studio request and archive limits
+
+`POST /api/re/inspect` accepts at most 64 MiB of binary data inside a 65 MiB
+multipart request. The streamed file is rejected with HTTP 413 if its decoded
+binary bytes exceed that limit. At most two inspections run concurrently;
+`file` and `strings` output is capped at 2 MiB, their normal subprocess timeout
+is 30 seconds, and at most 800 extracted strings are returned to the browser.
+The uploaded binary is never executed.
+
+Accepted binaries and their JSON metadata persist in
+`data/reverse/uploads/` until the local delete endpoint is used. The directory
+uses mode `0700`, files use `0600`, and metadata is installed by atomic rename.
+Before accepting an upload, LocalLLM scans the archive while holding a local
+reservation lock and reserves one full 64 MiB slot for each in-flight upload.
+It refuses another artifact when there are already 256 artifact IDs, when the
+existing bytes plus reservations and another full slot would exceed 2 GiB, or
+when archive capacity cannot be inspected safely. These fail-closed capacity
+responses use HTTP 507 and never delete older evidence automatically.
+
+The follow-up `POST /api/re/triage` JSON body is capped at 4 MiB, and
+`POST /api/re/mcp/investigate` is capped at 32 KiB. These encoded-body limits
+are independent of model context and tool-output limits.
+
 ## Recommended investigation sequence
 
 ### 1. Preserve evidence

@@ -38,29 +38,62 @@ import {
   Sparkles,
   TerminalSquare,
   Trash2,
-  UploadCloud,
   WandSparkles,
   X,
   type LucideIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { api, fileToDataUrl, formatBytes, pullModel, streamChat } from './api'
+import { api, fileToDataUrl, formatBytes, imageFileError, pullModel, streamAgentChat } from './api'
+import { BinaryDropZone } from './BinaryDropZone'
+import {
+  abortBinaryOperation,
+  beginBinaryOperation,
+  createBinaryOperationLifecycle,
+  finishBinaryOperation,
+  isCurrentBinaryOperation,
+} from './binaryLifecycle'
+import { CHAT_MODES, safeExternalHref, safeHostname } from './grounding'
 import {
   chooseAvailableAlias,
   isAliasInstalled,
   modelChoiceStatuses,
   type ModelKind,
 } from './modelAvailability'
+import {
+  abortMcpRequest,
+  beginMcpRequest,
+  createMcpRequestLane,
+  finishMcpRequest,
+  isCurrentMcpRequest,
+} from './mcpLifecycle'
+import {
+  beginRequest,
+  createRequestLifecycle,
+  finishRequest,
+  invalidateRequest,
+  isCurrentRequest,
+} from './requestLifecycle'
+import {
+  beginResearchStart,
+  createResearchRunGuard,
+  finishResearchStart,
+  invalidateResearchRun,
+  isCurrentResearchRun,
+} from './researchFlow'
+import { SafeModelMarkdown } from './SafeModelMarkdown'
 import type {
   BinaryMetadata,
   CatalogResponse,
+  ChatMode,
   ChatMessage,
   McpInvestigationResult,
   McpStatus,
   ModelInfo,
   ResearchTask,
+  ResearchDepth,
+  ResearchSource,
+  SearchMode,
+  SearchStatus,
   SystemStatus,
   ViewId,
 } from './types'
@@ -82,10 +115,6 @@ const PROMPTS = [
 
 function uid() {
   return crypto.randomUUID()
-}
-
-function Markdown({ children }: { children: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
 }
 
 function Logo() {
@@ -162,7 +191,7 @@ function Sidebar({ view, setView, open, setOpen }: { view: ViewId; setView: (vie
         </nav>
         <div className="privacy-card">
           <div className="privacy-icon"><ShieldCheck size={18} /></div>
-          <div><strong>Private by design</strong><p>Prompts stay on this machine. Web access only runs inside Research.</p></div>
+          <div><strong>Local inference, explicit retrieval</strong><p>Local mode makes no search request. Retrieval modes send queries and configured credentials to external providers and may fetch public pages.</p></div>
         </div>
         <div className="sidebar-footer"><span>LOCAL FIRST</span><span className="footer-line" /><span>v0.1</span></div>
       </aside>
@@ -177,12 +206,14 @@ function ModelSelect({
   catalog,
   kind = 'text',
   testId,
+  disabled = false,
 }: {
   model: string
   setModel: (model: string) => void
   catalog: CatalogResponse | null
   kind?: ModelKind
   testId?: string
+  disabled?: boolean
 }) {
   const choices = modelChoiceStatuses(catalog, kind)
   const hasInstalledChoice = choices.some((choice) => choice.installed)
@@ -200,7 +231,7 @@ function ModelSelect({
         aria-label={`${kind === 'vision' ? 'Vision' : 'Text'} model`}
         value={model}
         onChange={(event) => setModel(event.target.value)}
-        disabled={!catalog || !hasInstalledChoice}
+        disabled={disabled || !catalog || !hasInstalledChoice}
       >
         {choices.map((choice) => (
           <option key={choice.alias} value={choice.alias} disabled={choice.installed === false}>
@@ -236,32 +267,141 @@ function HeroTitle({ eyebrow, title, accent, copy }: { eyebrow: string; title: s
   )
 }
 
+const CHAT_MODE_ICONS: Record<ChatMode, LucideIcon> = {
+  local: ShieldCheck,
+  web: Globe2,
+  papers: BookOpen,
+  all: Sparkles,
+}
+
+function ChatModePicker({ mode, onChange, disabled = false }: { mode: ChatMode; onChange: (mode: ChatMode) => void; disabled?: boolean }) {
+  return (
+    <div className="chat-mode-picker" role="radiogroup" aria-label="Answer evidence mode" data-testid="chat-mode-picker">
+      {CHAT_MODES.map((option) => {
+        const Icon = CHAT_MODE_ICONS[option.id]
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={mode === option.id}
+            aria-label={option.label}
+            title={option.description}
+            className={mode === option.id ? 'is-active' : ''}
+            data-testid={`chat-mode-${option.id}`}
+            onClick={() => onChange(option.id)}
+            disabled={disabled}
+          >
+            <Icon size={13} />
+            <span>{option.shortLabel}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function SourceCards({ sources, compact = false }: { sources: ResearchSource[]; compact?: boolean }) {
+  if (!sources.length) return null
+  return (
+    <div className={`evidence-cards ${compact ? 'is-compact' : ''}`} aria-label={`${sources.length} retrieved sources`}>
+      {sources.map((source, index) => {
+        const provider = source.providers?.join(' + ') || source.provider || 'retrieved'
+        const authorLine = source.authors?.slice(0, 2).join(', ')
+        const details = [authorLine, source.year, source.citation_count != null ? `${source.citation_count} provider-reported citations` : '', source.doi ? `DOI ${source.doi}` : ''].filter(Boolean)
+        const provenanceTitle = source.provenance?.map((item) => `${item.provider} · ${item.record_id} · ${item.retrieved_at}`).join('\n')
+        const href = safeExternalHref(source.url)
+        const content = (
+          <>
+            <span className="source-number">{index + 1}</span>
+            <div className="source-card-copy">
+              <div className="source-badges"><span className={`source-kind ${source.kind === 'paper' ? 'is-paper' : ''}`}>{source.kind === 'paper' ? 'PAPER' : 'WEB'}</span><span>{provider}</span>{source.provenance?.length ? <span className="provenance-count">{source.provenance.length} trace{source.provenance.length === 1 ? '' : 's'}</span> : null}</div>
+              <strong>{source.title}</strong>
+              {!compact && source.snippet && <p>{source.snippet}</p>}
+              <small>{details.length ? details.join(' · ') : safeHostname(source.url)}</small>
+            </div>
+            {href ? <ExternalLink size={13} /> : <ShieldCheck size={13} />}
+          </>
+        )
+        return href
+          ? <a key={`${source.url}-${index}`} href={href} target="_blank" rel="noreferrer" className="evidence-card" title={provenanceTitle || `Retrieved via ${provider}`}>{content}</a>
+          : <div key={`${source.url}-${index}`} className="evidence-card is-disabled" title="Source URL was suppressed because it was not HTTP or HTTPS.">{content}</div>
+      })}
+    </div>
+  )
+}
+
+function ProviderStatusStrip({ status }: { status: SearchStatus | null }) {
+  if (!status) return <div className="provider-strip is-loading"><LoaderCircle className="spin" size={13} /> Loading provider configuration…</div>
+  const enabled = status.providers.filter((provider) => provider.enabled)
+  const configured = enabled.filter((provider) => !provider.requires_key || provider.configured)
+  return (
+    <div className="provider-strip" title={status.providers.map((provider) => `${provider.name}: ${provider.description}`).join('\n')}>
+      <span><StatusDot ok={configured.length > 0} /> {configured.length}/{enabled.length} enabled providers available by configuration</span>
+      <i />
+      <span>{status.limits.max_results} evidence results max</span>
+    </div>
+  )
+}
+
 function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null; initialPrompt?: string }) {
   const [model, setModel] = useState('localllm-fast')
+  const [visionModel, setVisionModel] = useState('localllm-vision')
   const [input, setInput] = useState(initialPrompt ?? '')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [image, setImage] = useState<string | undefined>()
+  const [mode, setMode] = useState<ChatMode>('local')
+  const [searchStatus, setSearchStatus] = useState<SearchStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const requestLifecycleRef = useRef(createRequestLifecycle())
   const abortRef = useRef<AbortController | null>(null)
+  const fileReadGenerationRef = useRef(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const textModel = chooseAvailableAlias(catalog, model, 'text')
-  const visionModel = chooseAvailableAlias(catalog, 'localllm-vision', 'vision')
-  const activeModel = image ? visionModel : textModel
+  const availableVisionModel = chooseAvailableAlias(catalog, visionModel, 'vision')
+  const hasImageContext = Boolean(image || messages.some((message) => message.image))
+  const activeModel = hasImageContext ? availableVisionModel : textModel
+  const threadMode = messages.length ? messages[messages.length - 1].mode ?? mode : mode
+  const threadLabel = threadMode === 'local'
+    ? 'LOCAL THREAD'
+    : `${CHAT_MODES.find((item) => item.id === threadMode)?.shortLabel.toUpperCase() ?? 'GROUNDED'}-GROUNDED THREAD`
 
   useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages])
   useEffect(() => {
     if (textModel && textModel !== model) setModel(textModel)
   }, [model, textModel])
+  useEffect(() => {
+    if (availableVisionModel && availableVisionModel !== visionModel) setVisionModel(availableVisionModel)
+  }, [availableVisionModel, visionModel])
+  useEffect(() => {
+    void api.searchStatus().then(setSearchStatus).catch(() => setSearchStatus(null))
+  }, [])
+  useEffect(() => () => {
+    invalidateRequest(requestLifecycleRef.current)
+    fileReadGenerationRef.current += 1
+    abortRef.current?.abort()
+  }, [])
 
   const send = useCallback(async () => {
     const text = input.trim()
-    if ((!text && !image) || busy || !activeModel) return
-    const user: ChatMessage = { id: uid(), role: 'user', content: text || 'Describe this image.', image }
+    if ((!text && !image) || !activeModel) return
+    const generation = beginRequest(requestLifecycleRef.current)
+    if (generation === null) return
+    const user: ChatMessage = { id: uid(), role: 'user', content: text || 'Describe this image.', image, mode }
     const assistantId = uid()
     const next = [...messages, user]
-    setMessages([...next, { id: assistantId, role: 'assistant', content: '', pending: true, model: activeModel }])
+    const initialActivity = mode === 'local' ? ['Sending this turn to the local model'] : ['Preparing an independent evidence search']
+    setMessages([...next, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      pending: true,
+      model: activeModel,
+      mode,
+      activity: initialActivity,
+    }])
     setInput('')
     setImage(undefined)
     setBusy(true)
@@ -269,25 +409,96 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      await streamChat(next, activeModel, (token) => {
-        setMessages((current) => current.map((message) =>
-          message.id === assistantId ? { ...message, content: message.content + token, pending: false } : message,
-        ))
+      await streamAgentChat(next, activeModel, mode, {
+        onStatus: (event) => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) => {
+            if (message.id !== assistantId) return message
+            const activity = [...(message.activity ?? [])]
+            if (!activity.includes(event.message)) activity.push(event.message)
+            return { ...message, activity, model: event.model ?? message.model }
+          }))
+        },
+        onSource: (source) => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) => message.id === assistantId ? {
+            ...message,
+            sources: [...(message.sources ?? []).filter((item) => item.url !== source.url), source],
+          } : message))
+        },
+        onWarning: (warning) => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) => message.id === assistantId ? {
+            ...message,
+            warning: [message.warning, warning].filter(Boolean).join(' '),
+          } : message))
+        },
+        onReasoning: () => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) => message.id === assistantId ? {
+            ...message,
+            activity: [...(message.activity ?? []).filter((item) => item !== 'Reasoning locally'), 'Reasoning locally'],
+          } : message))
+        },
+        onToken: (token) => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) =>
+            message.id === assistantId ? { ...message, content: message.content + token, pending: false } : message,
+          ))
+        },
+        onDone: (event) => {
+          if (!isCurrentRequest(requestLifecycleRef.current, generation)) return
+          setMessages((current) => current.map((message) => message.id === assistantId ? {
+            ...message,
+            model: event.model,
+            sources: event.sources.length ? event.sources : message.sources,
+            warning: event.warnings.length ? event.warnings.join(' ') : message.warning,
+            pending: false,
+          } : message))
+        },
       }, controller.signal)
     } catch (reason) {
-      if ((reason as Error).name !== 'AbortError') {
-        setError(reason instanceof Error ? reason.message : 'The local model could not respond.')
+      if (isCurrentRequest(requestLifecycleRef.current, generation) && (reason as Error).name !== 'AbortError') {
+        const message = reason instanceof Error ? reason.message : 'The local model could not respond.'
+        setError(message)
+        setMessages((current) => current.map((item) => item.id === assistantId ? {
+          ...item,
+          content: item.content || `I could not complete this turn. ${message}`,
+          warning: message,
+          pending: false,
+        } : item))
       }
     } finally {
-      setBusy(false)
-      abortRef.current = null
-      setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, pending: false } : message))
+      if (finishRequest(requestLifecycleRef.current, generation)) {
+        setBusy(false)
+        if (abortRef.current === controller) abortRef.current = null
+        setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, pending: false } : message))
+      }
     }
-  }, [activeModel, busy, image, input, messages])
+  }, [activeModel, image, input, messages, mode])
+
+  const clearThread = () => {
+    invalidateRequest(requestLifecycleRef.current)
+    fileReadGenerationRef.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
+    setBusy(false)
+    setMessages([])
+    setError('')
+  }
 
   const attach = async (file?: File) => {
-    if (!file || !file.type.startsWith('image/')) return
-    setImage(await fileToDataUrl(file))
+    const validation = imageFileError(file)
+    if (validation) { setError(validation); return }
+    const fileReadGeneration = ++fileReadGenerationRef.current
+    try {
+      const dataUrl = await fileToDataUrl(file!)
+      if (fileReadGenerationRef.current !== fileReadGeneration) return
+      setImage(dataUrl)
+      setError('')
+    } catch {
+      if (fileReadGenerationRef.current === fileReadGeneration) setError('The selected image could not be read.')
+    }
   }
 
   return (
@@ -302,17 +513,24 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
               return <button key={prompt.title} onClick={() => setInput(prompt.text)}><Icon size={19} /><strong>{prompt.title}</strong><span>{prompt.text}</span><ArrowRight size={16} /></button>
             })}
           </div>
+          <ProviderStatusStrip status={searchStatus} />
         </div>
       ) : (
         <div className="conversation">
-          <div className="conversation-title"><span className="eyebrow"><i />PRIVATE THREAD</span><h2>Untitled experiment</h2></div>
+          <div className="conversation-title">
+            <div><span className="eyebrow"><i />{threadLabel}</span><h2>Untitled experiment</h2></div>
+            <button className="icon-text-button" onClick={clearThread}><Trash2 size={14} /> Clear thread</button>
+          </div>
           {messages.map((message) => (
-            <article key={message.id} className={`message ${message.role}`}>
+            <article key={message.id} className={`message ${message.role}`} data-testid={`chat-message-${message.role}`} data-status={message.pending ? 'running' : 'complete'}>
               <div className="avatar">{message.role === 'user' ? 'YOU' : <Sparkles size={16} />}</div>
               <div className="message-body">
-                <span className="message-author">{message.role === 'user' ? 'You' : 'LocalLLM'}<small>{message.role === 'assistant' ? message.model ?? model : 'just now'}</small></span>
+                <span className="message-author">{message.role === 'user' ? 'You' : 'LocalLLM'}<small>{message.role === 'assistant' ? message.model ?? model : 'just now'}</small>{message.mode && <i>{CHAT_MODES.find((item) => item.id === message.mode)?.shortLabel}</i>}</span>
                 {message.image && <img src={message.image} alt="User attachment" />}
-                {message.pending && !message.content ? <div className="typing"><i /><i /><i /></div> : <Markdown>{message.content}</Markdown>}
+                {message.activity && message.pending && <div className="agent-activity" role="status" aria-live="polite">{message.activity.map((item, index) => <span key={item} className={index === message.activity!.length - 1 ? 'is-current' : ''}>{index === message.activity!.length - 1 ? <LoaderCircle className="spin" size={12} /> : <Check size={12} />}{item}</span>)}</div>}
+                {message.pending && !message.content ? <div className="typing" aria-label="Local model is responding"><i /><i /><i /></div> : <SafeModelMarkdown>{message.content}</SafeModelMarkdown>}
+                {message.warning && <div className="message-warning"><Activity size={13} />{message.warning}</div>}
+                {message.sources && <SourceCards sources={message.sources} compact />}
               </div>
             </article>
           ))}
@@ -321,23 +539,26 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       )}
       <div className="composer-wrap">
         {error && <div className="inline-error"><Activity size={15} />{error}</div>}
-        {image && <div className="attachment-preview"><img src={image} alt="Ready to send" /><span>Image ready</span><button onClick={() => setImage(undefined)}><X size={15} /></button></div>}
+        {image && <div className="attachment-preview"><img src={image} alt="Ready to send" /><span>Image ready · vision routing enabled</span><button onClick={() => setImage(undefined)} aria-label="Remove attached image"><X size={15} /></button></div>}
         <div className="composer">
+          <div className="composer-mode-row"><span>EVIDENCE</span><ChatModePicker mode={mode} onChange={setMode} disabled={busy} /><small>{CHAT_MODES.find((item) => item.id === mode)?.description}</small></div>
           <textarea data-testid="chat-input" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
           }} placeholder="Ask, create, compare, or explore…" rows={1} />
           <div className="composer-actions">
             <div className="composer-left">
-              <ModelSelect model={model} setModel={setModel} catalog={catalog} />
-              <input ref={fileRef} type="file" accept="image/*" hidden onChange={(event) => void attach(event.target.files?.[0])} />
-              <button className="tool-button" onClick={() => fileRef.current?.click()}><Paperclip size={16} /><span>Image</span></button>
+              {hasImageContext ? <ModelSelect model={visionModel} setModel={setVisionModel} catalog={catalog} kind="vision" testId="chat-vision-model-select" /> : <ModelSelect model={model} setModel={setModel} catalog={catalog} />}
+              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const inputElement = event.currentTarget; void attach(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
+              <button className="tool-button" onClick={() => fileRef.current?.click()} aria-label="Attach an image"><Paperclip size={16} /><span>Image</span></button>
             </div>
-            {busy ? <button data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !image) || !activeModel}><Send size={18} /></button>}
+            {busy ? <button aria-label="Stop response" data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button aria-label="Send message" data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !image) || !activeModel}><Send size={18} /></button>}
           </div>
         </div>
         {!activeModel
-          ? <ModelGateNote catalog={catalog} kind={image ? 'vision' : 'text'} />
-          : <p className="composer-note"><ShieldCheck size={13} /> Generated locally. Verify important outputs.</p>}
+          ? <ModelGateNote catalog={catalog} kind={hasImageContext ? 'vision' : 'text'} />
+          : <p className="composer-note"><ShieldCheck size={13} /> {mode === 'local'
+            ? 'Inference stays local; this turn makes no search request.'
+            : 'Inference stays local; retrieval sends queries and configured provider credentials to external services and may fetch public pages.'} Verify important outputs.</p>}
       </div>
     </section>
   )
@@ -348,41 +569,91 @@ function VisionView({ catalog }: { catalog: CatalogResponse | null }) {
   const [image, setImage] = useState<string>()
   const [prompt, setPrompt] = useState('Describe this image precisely. Read all visible text and call out anything uncertain.')
   const [answer, setAnswer] = useState('')
+  const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [drag, setDrag] = useState(false)
+  const requestLifecycleRef = useRef(createRequestLifecycle())
+  const abortRef = useRef<AbortController | null>(null)
+  const fileReadGenerationRef = useRef(0)
   const availableModel = chooseAvailableAlias(catalog, model, 'vision')
 
   useEffect(() => {
     if (availableModel && availableModel !== model) setModel(availableModel)
   }, [availableModel, model])
+  useEffect(() => () => {
+    invalidateRequest(requestLifecycleRef.current)
+    fileReadGenerationRef.current += 1
+    abortRef.current?.abort()
+  }, [])
 
   const chooseFile = async (file?: File) => {
-    if (file?.type.startsWith('image/')) setImage(await fileToDataUrl(file))
+    const validation = imageFileError(file)
+    if (validation) { setError(validation); return }
+    const fileReadGeneration = ++fileReadGenerationRef.current
+    try {
+      if (requestLifecycleRef.current.inFlight) {
+        invalidateRequest(requestLifecycleRef.current)
+        abortRef.current?.abort()
+        abortRef.current = null
+        setBusy(false)
+      }
+      setImage(undefined)
+      setAnswer('')
+      setError('')
+      const dataUrl = await fileToDataUrl(file!)
+      if (fileReadGenerationRef.current !== fileReadGeneration) return
+      setImage(dataUrl)
+    } catch {
+      if (fileReadGenerationRef.current === fileReadGeneration) setError('The selected image could not be read.')
+    }
   }
   const analyze = async () => {
-    if (!image || busy || !availableModel) return
+    if (!image || !availableModel) return
+    const generation = beginRequest(requestLifecycleRef.current)
+    if (generation === null) return
     setAnswer('')
     setBusy(true)
+    setError('')
     const message: ChatMessage = { id: uid(), role: 'user', content: prompt, image }
-    try { await streamChat([message], availableModel, (token) => setAnswer((current) => current + token)) }
-    catch (error) { setAnswer(`Unable to analyze locally: ${error instanceof Error ? error.message : String(error)}`) }
-    finally { setBusy(false) }
+    const controller = new AbortController()
+    abortRef.current = controller
+    try {
+      await streamAgentChat([message], availableModel, 'local', {
+        onToken: (token) => {
+          if (isCurrentRequest(requestLifecycleRef.current, generation)) setAnswer((current) => current + token)
+        },
+      }, controller.signal)
+    }
+    catch (reason) {
+      if (isCurrentRequest(requestLifecycleRef.current, generation) && (reason as Error).name !== 'AbortError') {
+        setError(`Unable to analyze locally: ${reason instanceof Error ? reason.message : String(reason)}`)
+      }
+    }
+    finally {
+      if (finishRequest(requestLifecycleRef.current, generation)) {
+        setBusy(false)
+        if (abortRef.current === controller) abortRef.current = null
+      }
+    }
   }
   return (
     <section className="padded-view">
       <HeroTitle eyebrow="MULTIMODAL WORKBENCH" title="See more." accent="Send nothing." copy="Inspect screenshots, diagrams, documents, hardware photos, and visual bugs with a vision model that stays on your GPUs." />
       <div className="vision-layout">
         <label className={`dropzone ${image ? 'has-image' : ''} ${drag ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDrag(true) }} onDragLeave={() => setDrag(false)} onDrop={(event) => { event.preventDefault(); setDrag(false); void chooseFile(event.dataTransfer.files[0]) }}>
-          <input type="file" accept="image/*" hidden onChange={(event) => void chooseFile(event.target.files?.[0])} />
-          {image ? <><img src={image} alt="Vision input" /><span className="replace-image"><RefreshCw size={15} /> Replace image</span></> : <div className="dropzone-empty"><div><ImagePlus size={28} /></div><strong>Drop an image into the lab</strong><p>PNG, JPEG, WEBP · screenshots welcome</p><span>CHOOSE IMAGE</span></div>}
+          <input type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const inputElement = event.currentTarget; void chooseFile(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
+          {image ? <><img src={image} alt="Vision input" /><span className="replace-image"><RefreshCw size={15} /> Replace image</span></> : <div className="dropzone-empty"><div><ImagePlus size={28} /></div><strong>Drop an image into the lab</strong><p>PNG, JPEG, WebP · up to 8 MB</p><span>CHOOSE IMAGE</span></div>}
         </label>
         <div className="vision-panel">
           <div className="panel-kicker"><Aperture size={17} /><span>INSPECTION BRIEF</span></div>
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} />
-          <div className="vision-controls"><ModelSelect model={model} setModel={setModel} catalog={catalog} kind="vision" /><button className="primary-button" disabled={!image || busy || !availableModel} onClick={() => void analyze()}>{busy ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />} Analyze</button></div>
+          <div className="vision-controls"><ModelSelect model={model} setModel={setModel} catalog={catalog} kind="vision" />{busy
+            ? <button className="primary-button vision-stop" aria-label="Stop image analysis" onClick={() => abortRef.current?.abort()}><CircleStop size={17} /> Stop</button>
+            : <button className="primary-button" disabled={!image || !availableModel} onClick={() => void analyze()}><WandSparkles size={17} /> Analyze</button>}</div>
+          {error && <div className="inline-error"><Activity size={14} />{error}</div>}
           <ModelGateNote catalog={catalog} kind="vision" />
           <div className={`vision-result ${answer ? 'has-answer' : ''}`}>
-            {answer ? <Markdown>{answer}</Markdown> : <div><Sparkles size={21} /><strong>Your analysis will appear here</strong><p>Try OCR, UI critique, circuit inspection, chart reading, or visual question answering.</p></div>}
+            {answer ? <SafeModelMarkdown>{answer}</SafeModelMarkdown> : <div><Sparkles size={21} /><strong>Your analysis will appear here</strong><p>Try OCR, UI critique, circuit inspection, chart reading, or visual question answering.</p></div>}
           </div>
         </div>
       </div>
@@ -393,66 +664,147 @@ function VisionView({ catalog }: { catalog: CatalogResponse | null }) {
 function ResearchView({ catalog }: { catalog: CatalogResponse | null }) {
   const [question, setQuestion] = useState('')
   const [model, setModel] = useState('localllm-deep')
+  const [mode, setMode] = useState<SearchMode>('both')
+  const [depth, setDepth] = useState<ResearchDepth>('standard')
+  const [searchStatus, setSearchStatus] = useState<SearchStatus | null>(null)
   const [task, setTask] = useState<ResearchTask | null>(null)
   const [error, setError] = useState('')
+  const [starting, setStarting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [pollEpoch, setPollEpoch] = useState(0)
+  const runGuardRef = useRef(createResearchRunGuard())
+  const pollAbortRef = useRef<AbortController | null>(null)
+  const cancelInFlightRef = useRef(false)
   const availableModel = chooseAvailableAlias(catalog, model, 'text')
 
   useEffect(() => {
     if (availableModel && availableModel !== model) setModel(availableModel)
   }, [availableModel, model])
+  useEffect(() => {
+    void api.searchStatus().then(setSearchStatus).catch(() => setSearchStatus(null))
+  }, [])
 
   useEffect(() => {
     if (!task || !['queued', 'running'].includes(task.status)) return
-    const timer = window.setInterval(() => {
-      void api.research(task.id).then(setTask).catch((reason) => setError(String(reason)))
-    }, 1500)
-    return () => window.clearInterval(timer)
-  }, [task])
+    const taskId = task.id
+    const generation = runGuardRef.current.generation
+    const controller = new AbortController()
+    let disposed = false
+    let timer: number | undefined
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = controller
+
+    const schedule = (delay = 1500) => {
+      timer = window.setTimeout(() => void poll(), delay)
+    }
+    const poll = async () => {
+      try {
+        const next = await api.research(taskId, controller.signal)
+        if (disposed || controller.signal.aborted || !isCurrentResearchRun(runGuardRef.current, generation)) return
+        setTask((current) => current?.id === taskId ? next : current)
+        if (['queued', 'running'].includes(next.status)) schedule()
+      } catch (reason) {
+        if (disposed || controller.signal.aborted || !isCurrentResearchRun(runGuardRef.current, generation)) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        schedule(3000)
+      }
+    }
+    schedule()
+    return () => {
+      disposed = true
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller.abort()
+      if (pollAbortRef.current === controller) pollAbortRef.current = null
+    }
+  }, [pollEpoch, task?.id, task?.status])
+
+  useEffect(() => () => {
+    invalidateResearchRun(runGuardRef.current)
+    pollAbortRef.current?.abort()
+  }, [])
 
   const start = async () => {
     if (question.trim().length < 8 || !availableModel) return
+    const generation = beginResearchStart(runGuardRef.current)
+    if (generation === null) return
+    setStarting(true)
     setError('')
-    try { setTask(await api.createResearch(question.trim(), availableModel)) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    try {
+      const next = await api.createResearch(question.trim(), availableModel, mode, depth)
+      if (isCurrentResearchRun(runGuardRef.current, generation)) setTask(next)
+    } catch (reason) {
+      if (isCurrentResearchRun(runGuardRef.current, generation)) setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (finishResearchStart(runGuardRef.current, generation)) setStarting(false)
+    }
   }
   const reset = async () => {
-    if (!task || cancelling) return
+    if (!task || cancelInFlightRef.current) return
+    cancelInFlightRef.current = true
+    const generation = invalidateResearchRun(runGuardRef.current)
+    pollAbortRef.current?.abort()
     setError('')
     if (['queued', 'running'].includes(task.status)) {
       setCancelling(true)
       try { await api.cancelResearch(task.id) }
       catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason))
-        setCancelling(false)
+        if (isCurrentResearchRun(runGuardRef.current, generation)) {
+          setError(reason instanceof Error ? reason.message : String(reason))
+          setCancelling(false)
+          setPollEpoch((current) => current + 1)
+        }
+        cancelInFlightRef.current = false
         return
       }
-      setCancelling(false)
     }
-    setTask(null)
-    setQuestion('')
+    if (isCurrentResearchRun(runGuardRef.current, generation)) {
+      setCancelling(false)
+      setTask(null)
+      setQuestion('')
+    }
+    cancelInFlightRef.current = false
   }
   return (
     <section className="padded-view research-view">
-      <HeroTitle eyebrow="AGENTIC WEB RESEARCH" title="Search widely." accent="Cite carefully." copy="Your local model plans the investigation, searches the open web, reads sources, and produces a traceable report with uncertainty kept visible." />
+      <HeroTitle eyebrow="AGENTIC WEB RESEARCH" title="Search widely." accent="Cite carefully." copy="A deterministic local orchestrator federates web and scholarly providers, reads usable sources, then asks your local model to synthesize a traceable report with uncertainty visible." />
       {!task ? (
         <div className="research-launch">
-          <div className="research-textarea-wrap"><Search size={23} /><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What do you want to understand deeply?" rows={4} /></div>
-          <div className="research-options"><ModelSelect model={model} setModel={setModel} catalog={catalog} /><div className="depth-control"><span>DEPTH</span><button className="is-active">Balanced</button><button disabled>Exhaustive</button></div><button className="primary-button large" onClick={() => void start()} disabled={question.trim().length < 8 || !availableModel}><Globe2 size={18} /> Begin research</button></div>
+          <div className="research-textarea-wrap"><Search size={23} /><textarea data-testid="research-question" aria-label="Deep research question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What do you want to understand deeply?" rows={4} /></div>
+          <div className="research-config-grid">
+            <div className="research-config-block"><span>SOURCE UNIVERSE</span><div className="segmented-control" role="radiogroup" aria-label="Research source universe">{([
+              ['web', 'Web', Globe2],
+              ['papers', 'Papers', BookOpen],
+              ['both', 'Both', Sparkles],
+            ] as const).map(([value, label, Icon]) => <button key={value} role="radio" aria-checked={mode === value} className={mode === value ? 'is-active' : ''} onClick={() => setMode(value)} disabled={starting}><Icon size={13} />{label}</button>)}</div></div>
+            <div className="research-config-block"><span>DEPTH</span><div className="segmented-control" role="radiogroup" aria-label="Research depth">{([
+              ['quick', 'Quick'],
+              ['standard', 'Standard'],
+              ['deep', 'Deep'],
+            ] as const).map(([value, label]) => <button key={value} role="radio" aria-checked={depth === value} className={depth === value ? 'is-active' : ''} onClick={() => setDepth(value)} disabled={starting}>{label}</button>)}</div></div>
+          </div>
+          <div className="research-options"><ModelSelect model={model} setModel={setModel} catalog={catalog} /><ProviderStatusStrip status={searchStatus} /><button data-testid="research-start" data-status={starting ? 'starting' : 'ready'} className="primary-button large" onClick={() => void start()} disabled={starting || question.trim().length < 8 || !availableModel}>{starting ? <LoaderCircle className="spin" size={18} /> : <Globe2 size={18} />} {starting ? 'Starting…' : 'Begin research'}</button></div>
           <ModelGateNote catalog={catalog} kind="text" />
+          <p className="composer-note research-network-note"><Cloud size={13} /> Research sends queries and configured provider credentials to external search or scholarly services, and may fetch public pages. Model inference remains local.</p>
           <div className="research-explain"><div><span>01</span><strong>Plan</strong><p>Generate distinct search angles.</p></div><ArrowRight size={17} /><div><span>02</span><strong>Read</strong><p>Extract clean evidence from sources.</p></div><ArrowRight size={17} /><div><span>03</span><strong>Synthesize</strong><p>Write a cited, uncertainty-aware report.</p></div></div>
         </div>
       ) : (
         <div className="research-run">
           <aside className="research-progress-card">
             <span className="eyebrow"><i />LIVE RUN</span><h3>{task.question}</h3>
+            <div className="run-badges"><span>{task.mode ?? mode}</span><span>{task.depth ?? depth}</span><span>{task.model}</span></div>
             <div className="progress-ring" style={{ '--progress': `${task.progress * 3.6}deg` } as React.CSSProperties}><div><strong>{task.progress}%</strong><span>{task.status}</span></div></div>
             <div className="progress-bar"><span style={{ width: `${task.progress}%` }} /></div><p>{task.stage}</p>
             {task.queries.length > 0 && <div className="query-list"><strong>SEARCH PLAN</strong>{task.queries.map((query) => <span key={query}><Search size={12} />{query}</span>)}</div>}
+            {task.providers?.length > 0 && <div className="provider-run-list"><strong>PROVIDER RUNS</strong>{task.providers.map((provider, index) => {
+              const hasError = Boolean(provider.error)
+              const summary = `${provider.result_count} hits · ${provider.duration_ms}ms`
+              return <span key={`${provider.name}-${index}`} className={provider.ok && !hasError ? 'is-ok' : 'is-error'}><StatusDot ok={provider.ok && !hasError} /><b>{provider.name}</b><small>{hasError ? `${summary} · ${provider.error}` : provider.ok ? summary : 'unavailable'}</small></span>
+            })}</div>}
+            {task.provider_errors?.length > 0 && <div className="provider-errors">{task.provider_errors.map((item, index) => <span key={`${item}-${index}`}><Activity size={11} />{item}</span>)}</div>}
             <button className="ghost-button" onClick={() => void reset()} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} {['queued', 'running'].includes(task.status) ? 'Cancel & start new' : 'New research'}</button>
           </aside>
           <div className="research-report">
-            {task.status === 'complete' ? <><div className="report-header"><div><span>RESEARCH REPORT</span><h2>{task.question}</h2></div><button className="icon-text-button" onClick={() => navigator.clipboard.writeText(task.report)}><Clipboard size={15} /> Copy</button></div><div className="markdown-report"><Markdown>{task.report}</Markdown></div><div className="source-grid">{task.sources.map((source, index) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer"><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{source.title}</strong><small>{new URL(source.url).hostname}</small></div><ExternalLink size={14} /></a>)}</div></> : ['failed', 'cancelled'].includes(task.status) ? <div className="empty-report error"><Activity size={25} /><strong>{task.status === 'cancelled' ? 'Research cancelled' : 'Research stopped'}</strong><p>{task.error ?? 'This run was stopped before completion.'}</p></div> : <div className="empty-report"><div className="research-loader"><Globe2 size={26} /><i /><i /></div><strong>{task.stage}</strong><p>The local agent is working. You can leave this view and return.</p></div>}
+            {task.status === 'complete' ? <><div className="report-header"><div><span>RESEARCH REPORT</span><h2>{task.question}</h2></div><button className="icon-text-button" onClick={() => navigator.clipboard.writeText(task.report)}><Clipboard size={15} /> Copy</button></div><div className="markdown-report"><SafeModelMarkdown>{task.report}</SafeModelMarkdown></div><div className="report-evidence-heading"><div><span>EVIDENCE LEDGER</span><strong>{task.sources.length} normalized, deduplicated sources</strong></div><p>External navigation is available only through these retrieved source cards. Provider, publication, DOI, and provider-reported citation metadata remain attached.</p></div><SourceCards sources={task.sources} /></> : ['failed', 'cancelled'].includes(task.status) ? <div className="empty-report error"><Activity size={25} /><strong>{task.status === 'cancelled' ? 'Research cancelled' : 'Research stopped'}</strong><p>{task.error ?? 'This run was stopped before completion.'}</p><button className="primary-button" onClick={() => void reset()}><RefreshCw size={14} /> Try again</button></div> : <div className="empty-report" data-testid="research-running" data-status={task.status}><div className="research-loader"><Globe2 size={26} /><i /><i /></div><strong>{task.stage}</strong><p>The local agent is working. You can leave this view and return.</p></div>}
           </div>
         </div>
       )}
@@ -502,7 +854,7 @@ function ModelsView({ catalog, refresh }: { catalog: CatalogResponse | null; ref
       {catalog?.ollama?.ok === false && <div className="inline-error"><Activity size={15} />Model runtime unavailable: {catalog.ollama.error ?? 'Ollama did not answer.'}</div>}
       <div className="filter-row"><div>{(['all', 'text', 'vision', 'embedding'] as const).map((item) => <button key={item} className={filter === item ? 'is-active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><button className="icon-text-button" onClick={() => void refresh()}><RefreshCw size={15} /> Refresh</button></div>
       <div className="model-grid">{models.map((model) => <ModelCard key={model.id} model={model} progress={pulls[model.id]} onPull={(id) => void pull(id)} />)}</div>
-      <div className="quant-note"><Gauge size={24} /><div><strong>Why both quantizations?</strong><p>Q4_K_M is the daily driver: less VRAM, larger KV cache, faster startup. Q8_0 is the comparison lane when small accuracy differences matter. The 30B Q8 spans both cards; the smaller models fit on one.</p></div></div>
+      <div className="quant-note"><Gauge size={24} /><div><strong>Why both quantizations?</strong><p>Q4_K_M is the daily driver: less VRAM, larger KV cache, faster startup. Q8_0 is the comparison lane when small accuracy differences matter. The 30B Q8 is intended for this dual-card host, but Ollama decides live placement from context size and available memory.</p></div></div>
     </section>
   )
 }
@@ -522,8 +874,13 @@ function McpInvestigator({
   const [binaryName, setBinaryName] = useState('')
   const [question, setQuestion] = useState('Which input paths are security-relevant, and where are their bounds validated?')
   const [result, setResult] = useState<McpInvestigationResult | null>(null)
+  const [resultBinaryName, setResultBinaryName] = useState('')
   const [investigationError, setInvestigationError] = useState('')
   const [investigating, setInvestigating] = useState(false)
+  const refreshLaneRef = useRef(createMcpRequestLane())
+  const refreshAbortRef = useRef<AbortController | null>(null)
+  const investigationLaneRef = useRef(createMcpRequestLane())
+  const investigationAbortRef = useRef<AbortController | null>(null)
   const availableModel = chooseAvailableAlias(catalog, model, 'text')
   const binaries = status?.binaries ?? []
   const mutationCount = Array.isArray(status?.mutation_tools_blocked)
@@ -531,17 +888,33 @@ function McpInvestigator({
     : 8
 
   const refresh = useCallback(async () => {
+    const generation = beginMcpRequest(refreshLaneRef.current)
+    if (generation === null) return
+    const controller = new AbortController()
+    refreshAbortRef.current = controller
     setStatusBusy(true)
     try {
-      const next = await api.mcpStatus()
-      setStatus(next)
-      setStatusError(next.ok ? '' : next.error ?? 'The read-only MCP bridge is unavailable.')
+      const next = await api.mcpStatus(controller.signal)
+      if (isCurrentMcpRequest(refreshLaneRef.current, generation)) {
+        setStatus(next)
+        setStatusError(next.ok ? '' : next.error ?? 'The read-only MCP bridge is unavailable.')
+      }
     } catch (reason) {
-      setStatus(null)
-      setStatusError(reason instanceof Error ? reason.message : String(reason))
+      if (isCurrentMcpRequest(refreshLaneRef.current, generation) && (reason as Error).name !== 'AbortError') {
+        setStatus(null)
+        setStatusError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
-      setStatusBusy(false)
+      if (finishMcpRequest(refreshLaneRef.current, generation)) {
+        if (refreshAbortRef.current === controller) refreshAbortRef.current = null
+        setStatusBusy(false)
+      }
     }
+  }, [])
+
+  useEffect(() => () => {
+    abortMcpRequest(refreshLaneRef.current, refreshAbortRef.current)
+    abortMcpRequest(investigationLaneRef.current, investigationAbortRef.current)
   }, [])
 
   useEffect(() => {
@@ -551,22 +924,40 @@ function McpInvestigator({
   }, [refresh])
 
   useEffect(() => {
+    if (investigating) return
     if (!status?.ok) return
     if (binaries.some((binary) => binary.name === binaryName)) return
     setBinaryName(binaries[0]?.name ?? '')
-  }, [binaries, binaryName, status?.ok])
+  }, [binaries, binaryName, investigating, status?.ok])
 
   const investigate = async () => {
-    if (!status?.ok || !binaryName || question.trim().length < 8 || !availableModel || investigating) return
+    if (!status?.ok || !binaryName || question.trim().length < 8 || !availableModel) return
+    const generation = beginMcpRequest(investigationLaneRef.current)
+    if (generation === null) return
+    const controller = new AbortController()
+    investigationAbortRef.current = controller
+    const requestedBinary = binaryName
+    const requestedQuestion = question.trim()
+    const requestedModel = availableModel
     setInvestigating(true)
     setInvestigationError('')
     setResult(null)
+    setResultBinaryName('')
     try {
-      setResult(await api.investigateMcp(binaryName, question.trim(), availableModel))
+      const next = await api.investigateMcp(requestedBinary, requestedQuestion, requestedModel, controller.signal)
+      if (isCurrentMcpRequest(investigationLaneRef.current, generation)) {
+        setResult(next)
+        setResultBinaryName(requestedBinary)
+      }
     } catch (reason) {
-      setInvestigationError(reason instanceof Error ? reason.message : String(reason))
+      if (isCurrentMcpRequest(investigationLaneRef.current, generation) && (reason as Error).name !== 'AbortError') {
+        setInvestigationError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
-      setInvestigating(false)
+      if (finishMcpRequest(investigationLaneRef.current, generation)) {
+        if (investigationAbortRef.current === controller) investigationAbortRef.current = null
+        setInvestigating(false)
+      }
     }
   }
 
@@ -605,8 +996,11 @@ function McpInvestigator({
               id="mcp-binary"
               data-testid="mcp-binary-select"
               value={binaryName}
-              disabled={!status?.ok || binaries.length === 0}
-              onChange={(event) => { setBinaryName(event.target.value); setResult(null); setInvestigationError('') }}
+              disabled={!status?.ok || binaries.length === 0 || investigating}
+              onChange={(event) => {
+                if (investigationLaneRef.current.inFlight) return
+                setBinaryName(event.target.value); setResult(null); setResultBinaryName(''); setInvestigationError('')
+              }}
             >
               {binaries.length === 0 && <option value="">No indexed project binaries</option>}
               {binaries.map((binary) => (
@@ -630,13 +1024,24 @@ function McpInvestigator({
             id="mcp-question"
             data-testid="mcp-question"
             value={question}
-            onChange={(event) => setQuestion(event.target.value)}
+            disabled={investigating}
+            onChange={(event) => {
+              if (!investigationLaneRef.current.inFlight) setQuestion(event.target.value)
+            }}
             rows={5}
             placeholder="Where is this protocol parsed, and what evidence supports that conclusion?"
           />
 
           <div className="mcp-investigate-actions">
-            <ModelSelect model={model} setModel={setModel} catalog={catalog} testId="mcp-model-select" />
+            <ModelSelect
+              model={model}
+              setModel={(next) => {
+                if (!investigationLaneRef.current.inFlight) setModel(next)
+              }}
+              catalog={catalog}
+              testId="mcp-model-select"
+              disabled={investigating}
+            />
             <button
               className="primary-button"
               data-testid="mcp-investigate"
@@ -657,10 +1062,10 @@ function McpInvestigator({
           {result ? (
             <>
               <div className="mcp-answer-header">
-                <div><span>READ-ONLY FINDINGS</span><h3>{binaryName}</h3></div>
+                <div><span>READ-ONLY FINDINGS</span><h3>{resultBinaryName || binaryName}</h3></div>
                 <div><Check size={13} />{Object.keys(result.evidence).length} evidence groups</div>
               </div>
-              <div className="mcp-answer-markdown"><Markdown>{result.analysis}</Markdown></div>
+              <div className="mcp-answer-markdown"><SafeModelMarkdown>{result.analysis}</SafeModelMarkdown></div>
               <div className="mcp-result-safety"><ShieldCheck size={15} /><span>{result.safety}</span></div>
             </>
           ) : (
@@ -688,7 +1093,11 @@ function ReverseView({ catalog }: { catalog: CatalogResponse | null }) {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [deleteSuccess, setDeleteSuccess] = useState('')
+  const metadataRef = useRef<BinaryMetadata | null>(null)
+  const operationLifecycleRef = useRef(createBinaryOperationLifecycle())
+  const operationAbortRef = useRef<AbortController | null>(null)
   const availableModel = chooseAvailableAlias(catalog, model, 'text')
+  const interactionBusy = busy || deleting
   const refreshToolchain = useCallback(async () => {
     try {
       setToolchain(await api.toolchain())
@@ -706,44 +1115,102 @@ function ReverseView({ catalog }: { catalog: CatalogResponse | null }) {
     const timer = window.setTimeout(() => setDeleteArmed(false), 6000)
     return () => window.clearTimeout(timer)
   }, [deleteArmed])
+  useEffect(() => () => {
+    abortBinaryOperation(operationLifecycleRef.current, operationAbortRef.current)
+  }, [])
   const inspect = async (file?: File) => {
     if (!file) return
+    if (operationLifecycleRef.current.inFlight) return
+    if (metadataRef.current) {
+      setWorkbenchError('Delete the current local artifact before inspecting another binary.')
+      return
+    }
     if (file.size > 64 * 1024 * 1024) {
       setWorkbenchError('This binary exceeds the 64 MB local inspection limit.')
       return
     }
+    const generation = beginBinaryOperation(operationLifecycleRef.current, 'upload')
+    if (generation === null) return
+    const controller = new AbortController()
+    operationAbortRef.current = controller
     setBusy(true); setAnalysis(''); setWorkbenchError(''); setDeleteSuccess(''); setDeleteError(''); setDeleteArmed(false)
-    try { setMetadata(await api.inspectBinary(file)) }
-    catch (reason) { setWorkbenchError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setBusy(false) }
+    try {
+      const uploaded = await api.inspectBinary(file, controller.signal)
+      if (!isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'upload')) {
+        try { await api.deleteInspection(uploaded.id) }
+        catch { /* Best-effort cleanup for an upload invalidated during teardown. */ }
+        return
+      }
+      metadataRef.current = uploaded
+      setMetadata(uploaded)
+    } catch (reason) {
+      if (isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'upload') && (reason as Error).name !== 'AbortError') {
+        setWorkbenchError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (finishBinaryOperation(operationLifecycleRef.current, generation)) {
+        if (operationAbortRef.current === controller) operationAbortRef.current = null
+        setBusy(false)
+      }
+    }
   }
   const triage = async () => {
-    if (!metadata || !availableModel) return
+    const currentMetadata = metadataRef.current
+    if (!currentMetadata || !availableModel) return
+    const generation = beginBinaryOperation(operationLifecycleRef.current, 'triage')
+    if (generation === null) return
+    const controller = new AbortController()
+    operationAbortRef.current = controller
     setBusy(true); setWorkbenchError('')
-    try { setAnalysis((await api.triageBinary(metadata, availableModel)).analysis) }
-    catch (reason) { setWorkbenchError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setBusy(false) }
+    try {
+      const result = await api.triageBinary(currentMetadata, availableModel, controller.signal)
+      if (isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'triage') && metadataRef.current?.id === currentMetadata.id) {
+        setAnalysis(result.analysis)
+      }
+    } catch (reason) {
+      if (isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'triage') && (reason as Error).name !== 'AbortError') {
+        setWorkbenchError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (finishBinaryOperation(operationLifecycleRef.current, generation)) {
+        if (operationAbortRef.current === controller) operationAbortRef.current = null
+        setBusy(false)
+      }
+    }
   }
   const deleteLocalArtifact = async () => {
-    if (!metadata || deleting) return
+    const currentMetadata = metadataRef.current
+    if (!currentMetadata || operationLifecycleRef.current.inFlight) return
     if (!deleteArmed) {
       setDeleteArmed(true)
       setDeleteError('')
       return
     }
-    const filename = metadata.filename
+    const generation = beginBinaryOperation(operationLifecycleRef.current, 'delete')
+    if (generation === null) return
+    const controller = new AbortController()
+    operationAbortRef.current = controller
+    const filename = currentMetadata.filename
     setDeleteArmed(false)
     setDeleting(true)
     setDeleteError('')
     try {
-      await api.deleteInspection(metadata.id)
-      setMetadata(null)
-      setAnalysis('')
-      setDeleteSuccess(`${filename} and its inspection metadata were deleted from local storage.`)
+      await api.deleteInspection(currentMetadata.id, controller.signal)
+      if (isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'delete') && metadataRef.current?.id === currentMetadata.id) {
+        metadataRef.current = null
+        setMetadata(null)
+        setAnalysis('')
+        setDeleteSuccess(`${filename} and its inspection metadata were deleted from local storage.`)
+      }
     } catch (reason) {
-      setDeleteError(reason instanceof Error ? reason.message : String(reason))
+      if (isCurrentBinaryOperation(operationLifecycleRef.current, generation, 'delete') && (reason as Error).name !== 'AbortError') {
+        setDeleteError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
-      setDeleting(false)
+      if (finishBinaryOperation(operationLifecycleRef.current, generation)) {
+        if (operationAbortRef.current === controller) operationAbortRef.current = null
+        setDeleting(false)
+      }
     }
   }
   const toolRows = [
@@ -763,12 +1230,7 @@ function ReverseView({ catalog }: { catalog: CatalogResponse | null }) {
           {!metadata ? (
             <>
               {deleteSuccess && <div className="binary-delete-success" role="status"><Check size={15} /><span><strong>Local artifact deleted</strong>{deleteSuccess}</span></div>}
-              <label className="binary-drop">
-                <input hidden type="file" onChange={(event) => void inspect(event.target.files?.[0])} />
-                {busy ? <LoaderCircle className="spin" size={28} /> : <UploadCloud size={28} />}
-                <strong>{busy ? 'Inspecting metadata…' : 'Choose a binary to inspect'}</strong>
-                <p>Up to 64 MB · stored locally · static inspection only</p>
-              </label>
+              <BinaryDropZone busy={busy} disabled={interactionBusy} onFile={inspect} />
             </>
           ) : (
             <div className="binary-result">
@@ -779,18 +1241,18 @@ function ReverseView({ catalog }: { catalog: CatalogResponse | null }) {
               </div>
               <div className="hash-row"><span>SHA-256</span><code>{metadata.sha256}</code></div>
               <div className="binary-stats"><span><strong>{formatBytes(metadata.size)}</strong> size</span><span><strong>{metadata.strings.length}</strong> strings sampled</span></div>
-              <div className="binary-agent-actions"><ModelSelect model={model} setModel={setModel} catalog={catalog} /><button className="primary-button" onClick={() => void triage()} disabled={busy || deleting || !availableModel}>{busy ? <LoaderCircle className="spin" size={16} /> : <BrainCircuit size={16} />} Ask local RE agent</button></div>
+              <div className="binary-agent-actions"><ModelSelect model={model} setModel={setModel} catalog={catalog} /><button className="primary-button" onClick={() => void triage()} disabled={interactionBusy || !availableModel}>{busy ? <LoaderCircle className="spin" size={16} /> : <BrainCircuit size={16} />} Ask local RE agent</button></div>
               <ModelGateNote catalog={catalog} kind="text" />
               <div className={`binary-retention ${deleteArmed ? 'is-armed' : ''}`}>
                 <div><ShieldCheck size={16} /><span><strong>Local retention</strong><small>The uploaded binary and JSON metadata remain only on this machine.</small></span></div>
                 <div className="binary-delete-actions">
-                  {deleteArmed && <button className="cancel-delete" onClick={() => setDeleteArmed(false)} disabled={deleting}>Cancel</button>}
+                  {deleteArmed && <button className="cancel-delete" onClick={() => setDeleteArmed(false)} disabled={interactionBusy}>Cancel</button>}
                   <button
                     className="delete-artifact-button"
                     data-testid="delete-local-artifact"
                     data-confirmation={deleteArmed ? 'armed' : 'idle'}
                     onClick={() => void deleteLocalArtifact()}
-                    disabled={deleting || busy}
+                    disabled={interactionBusy}
                   >
                     {deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
                     {deleting ? 'Deleting…' : deleteArmed ? 'Confirm permanent delete' : 'Delete local artifact'}
@@ -804,7 +1266,7 @@ function ReverseView({ catalog }: { catalog: CatalogResponse | null }) {
           {workbenchError && <div className="inline-error"><Activity size={15} />{workbenchError}</div>}
         </div>
       </div>
-      {analysis && <div className="triage-report"><div className="report-header"><div><span>LOCAL AGENT NOTES</span><h2>Evidence-led triage</h2></div></div><Markdown>{analysis}</Markdown></div>}
+      {analysis && <div className="triage-report"><div className="report-header"><div><span>LOCAL AGENT NOTES</span><h2>Evidence-led triage</h2></div></div><SafeModelMarkdown>{analysis}</SafeModelMarkdown></div>}
       <McpInvestigator catalog={catalog} model={model} setModel={setModel} />
       <div className="safety-banner"><ShieldCheck size={22} /><div><strong>Binary content is untrusted data.</strong><p>The agent is explicitly instructed to ignore embedded prompt-like strings. Its conclusions remain hypotheses until supported by cross-references, packet captures, tests, or hardware behavior.</p></div></div>
     </section>
@@ -851,9 +1313,9 @@ print(response.output_text)`
     <section className="padded-view api-view">
       <HeroTitle eyebrow="DROP-IN LOCAL API" title="Familiar format." accent="Private backend." copy="Point OpenAI SDKs and compatible tools at one loopback URL. Friendly aliases keep your applications independent from exact quantization tags." />
       <div className="endpoint-hero"><div className="endpoint-icon"><Server size={25} /></div><div><span>BASE URL</span><code>http://127.0.0.1:8008/v1</code></div><button onClick={() => navigator.clipboard.writeText('http://127.0.0.1:8008/v1')}><Clipboard size={17} /></button><i>LOCAL</i></div>
-      <div className="api-grid"><CodeBlock title="RESPONSES API · PYTHON" code={python} /><CodeBlock title="CHAT COMPLETIONS · CURL" code={curl} /><CodeBlock title="VISION INPUT · PYTHON" code={vision} /><div className="alias-card"><div className="panel-kicker"><Layers3 size={17} /><span>STABLE MODEL ALIASES</span></div>{[['localllm-pocket', 'Qwen3 4B Q4'], ['localllm-fast', 'Qwen3 8B Q4'], ['localllm-deep', 'Qwen3 30B Q4'], ['localllm-max', 'Qwen3 30B Q8'], ['localllm-vision', 'Qwen3-VL 8B Q4'], ['localllm-embed', 'BGE-M3 embeddings']].map(([alias, target]) => <div key={alias}><code>{alias}</code><ArrowRight size={13} /><span>{target}</span></div>)}</div></div>
+      <div className="api-grid"><CodeBlock title="RESPONSES API · PYTHON" code={python} /><CodeBlock title="CHAT COMPLETIONS · CURL" code={curl} /><CodeBlock title="VISION INPUT · PYTHON" code={vision} /><div className="alias-card"><div className="panel-kicker"><Layers3 size={17} /><span>STABLE MODEL ALIASES</span></div>{[['localllm-pocket', 'Qwen3 4B Q4'], ['localllm-fast', 'Qwen3 8B Q4'], ['localllm-balanced', 'Qwen3 8B Q8'], ['localllm-deep', 'Qwen3 30B Q4'], ['localllm-max', 'Qwen3 30B Q8'], ['localllm-vision', 'Qwen3-VL 8B Q4'], ['localllm-vision-max', 'Qwen3-VL 8B Q8'], ['localllm-vision-xl', 'Qwen3-VL 30B Q4'], ['localllm-embed', 'BGE-M3 embeddings']].map(([alias, target]) => <div key={alias}><code>{alias}</code><ArrowRight size={13} /><span>{target}</span></div>)}</div></div>
       <div className="api-features"><div><MessageCircleMore /><strong>Chat Completions</strong><code>POST /v1/chat/completions</code></div><div><Sparkles /><strong>Responses</strong><code>POST /v1/responses</code></div><div><Boxes /><strong>Models</strong><code>GET /v1/models</code></div><div><BrainCircuit /><strong>Embeddings</strong><code>POST /v1/embeddings</code></div></div>
-      <div className="api-note"><KeyRound size={21} /><div><strong>Authentication that local tools understand</strong><p>Use <code>local-dev-key</code> by default or set <code>LOCALLLM_API_KEY</code>. LocalLLM enforces a loopback-only boundary; use an authenticated SSH or VPN tunnel for remote access.</p></div></div>
+      <div className="api-note"><KeyRound size={21} /><div><strong>Authentication that local tools understand</strong><p>Use <code>local-dev-key</code> by default or set <code>LOCALLLM_API_KEY</code>. LocalLLM enforces a loopback-only boundary. Do not expose or tunnel it directly; deliberate remote access needs an authorization proxy in front.</p></div></div>
     </section>
   )
 }
