@@ -223,7 +223,10 @@ async def test_federated_search_falls_back_and_filters_unsafe_urls() -> None:
     assert [item.name for item in outcome.providers] == ["configured", "duckduckgo"]
     assert not outcome.providers[0].ok
     assert outcome.providers[1].ok
-    assert "Unavailable providers: configured" in outcome.warnings
+    assert (
+        "Some search connectors did not answer; successful fallbacks still supplied the evidence: configured"
+        in outcome.warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -641,7 +644,10 @@ async def test_structured_keyless_failure_is_diagnostic_and_does_not_block_sibli
         ("github_repositories", True),
     ]
     assert outcome.providers[0].error == "wikipedia returned invalid JSON"
-    assert "Unavailable providers: wikipedia" in outcome.warnings
+    assert (
+        "Some search connectors did not answer; successful fallbacks still supplied the evidence: wikipedia"
+        in outcome.warnings
+    )
 
 
 def test_status_exposes_explicit_structured_keyless_provenance() -> None:

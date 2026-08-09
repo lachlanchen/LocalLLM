@@ -1549,7 +1549,12 @@ class FederatedSearch:
         warnings = []
         failed = [provider.name for provider in diagnostics if not provider.ok]
         if failed:
-            warnings.append("Unavailable providers: " + ", ".join(failed))
+            prefix = (
+                "Some search connectors did not answer; successful fallbacks still supplied the evidence: "
+                if ranked
+                else "Search connectors unavailable: "
+            )
+            warnings.append(prefix + ", ".join(failed))
         if not ranked:
             warnings.append("No usable public search results were returned")
         return SearchOutcome(query, mode, ranked, diagnostics, warnings)

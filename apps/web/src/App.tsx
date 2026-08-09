@@ -218,6 +218,7 @@ function ModelSelect({
   const choices = modelChoiceStatuses(catalog, kind)
   const hasInstalledChoice = choices.some((choice) => choice.installed)
   const selectedIsInstalled = isAliasInstalled(catalog, model)
+  const selectedLabel = choices.find((choice) => choice.alias === model)?.label ?? model
   const statusLabel = !catalog
     ? 'Checking installed models'
     : selectedIsInstalled
@@ -226,6 +227,7 @@ function ModelSelect({
   return (
     <label className={`model-select ${selectedIsInstalled ? 'is-ready' : 'is-unavailable'}`} title={statusLabel}>
       <Sparkles size={15} />
+      <span className="model-select-value" aria-hidden="true">{selectedLabel}</span>
       <select
         data-testid={testId ?? `${kind}-model-select`}
         aria-label={`${kind === 'vision' ? 'Vision' : 'Text'} model`}
@@ -992,6 +994,11 @@ function McpInvestigator({
           <label className="field-label" htmlFor="mcp-binary">PROJECT BINARY</label>
           <div className="mcp-binary-select">
             <Binary size={17} />
+            <span className="mcp-binary-select-value" aria-hidden="true">
+              {selectedBinary
+                ? `${selectedBinary.name} · ${selectedBinary.code_indexed && selectedBinary.strings_indexed ? 'indexed' : selectedBinary.analysis_complete ? 'analyzed' : 'processing'}`
+                : 'No indexed project binaries'}
+            </span>
             <select
               id="mcp-binary"
               data-testid="mcp-binary-select"
@@ -1327,7 +1334,14 @@ function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null)
 
   const refreshStatus = useCallback(() => { void api.system().then(setStatus).catch(() => setStatus(null)) }, [])
-  const refreshCatalog = useCallback(async () => { try { setCatalog(await api.catalog()) } catch { setCatalog(null) } }, [])
+  const refreshCatalog = useCallback(async () => {
+    try {
+      setCatalog(await api.catalog())
+    } catch {
+      // Keep the last verified catalog so a transient refresh failure does not
+      // turn every otherwise usable model picker into a disabled control.
+    }
+  }, [])
   useEffect(() => {
     refreshStatus()
     void refreshCatalog()
