@@ -1,0 +1,4 @@
+time=2026-08-09T10:48:11+08:00 level=INFO msg="inference compute" id=0 library=CUDA type=discrete
+time=2026-08-09T10:48:11+08:00 level=INFO msg="inference compute" id=1 library=ROCm type=discrete
+time=2026-08-09T10:48:11+08:00 level=INFO msg="inference compute" id=2 library=cpu type=system
+time=2026-08-09T10:48:11+08:00 level=INFO msg="inference compute" id=3 library=unknown type=discrete

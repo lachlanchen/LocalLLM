@@ -815,6 +815,23 @@ class GroundedChatService:
 router = APIRouter()
 
 
+def _json_structure_is_bounded(value: object, max_depth: int = 100) -> bool:
+    """Reject parser-version-dependent nesting before schema validation."""
+
+    stack: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if depth > max_depth or nodes > 100_000:
+            return False
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+    return True
+
+
 async def _bounded_json_object(request: Request) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -869,6 +886,8 @@ async def _bounded_json_object(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Chat request body is not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=422, detail="Chat request must be a JSON object")
+    if not _json_structure_is_bounded(parsed):
+        raise HTTPException(status_code=400, detail="Chat request JSON is nested too deeply")
     return parsed
 
 

@@ -20,12 +20,12 @@ assert_inventory() {
 }
 
 assert_inventory \
-  ollama-inventory-two-gpus.log \
+  ollama-inventory-two-gpus.txt \
   "2 pci_id=0000:09:00.0 pci_id=0000:01:00.0"
-assert_inventory ollama-inventory-cpu-only.log "0"
-assert_inventory ollama-inventory-mixed.log "1 pci_id=0000:01:00.0"
+assert_inventory ollama-inventory-cpu-only.txt "0"
+assert_inventory ollama-inventory-mixed.txt "1 pci_id=0000:01:00.0"
 assert_inventory \
-  ollama-inventory-legacy.log \
+  ollama-inventory-legacy.txt \
   "2 library=cuda,id=0 library=rocm,id=1"
 
 function nvidia-smi {

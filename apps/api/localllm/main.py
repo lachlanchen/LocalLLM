@@ -255,6 +255,23 @@ def _reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"Non-finite JSON number {value!r} is not allowed")
 
 
+def _json_structure_is_bounded(value: object, max_depth: int = 100) -> bool:
+    """Bound container depth consistently across supported Python parsers."""
+
+    stack: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if depth > max_depth or nodes > 100_000:
+            return False
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+    return True
+
+
 async def _bounded_json_object(request: Request, max_bytes: int) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
     if content_length:
@@ -280,6 +297,8 @@ async def _bounded_json_object(request: Request, max_bytes: int) -> dict[str, An
         raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
     if not isinstance(decoded, dict):
         raise HTTPException(status_code=422, detail="Request body must be a JSON object")
+    if not _json_structure_is_bounded(decoded):
+        raise HTTPException(status_code=400, detail="Request JSON is nested too deeply")
     return decoded
 
 
