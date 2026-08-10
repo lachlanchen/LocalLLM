@@ -12,6 +12,12 @@ LocalLLM Studio turns a capable Linux workstation into a coherent local AI syste
 
 The application is useful before every model is downloaded: system diagnostics, model pulls, the built-in API Desk, and bounded static binary inspection remain available independently.
 
+## Playground preview
+
+[![LocalLLM Studio Playground showing a saved QAOA conversation](docs/images/qaoa-session.png)](docs/images/qaoa-session.png)
+
+*A resumable QAOA conversation rendered by the local Qwen3 8B model. Open the image for the full 2880 × 1826 capture.*
+
 ## What is inside
 
 | Workspace | Purpose |
