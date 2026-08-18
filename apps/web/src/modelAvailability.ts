@@ -15,6 +15,7 @@ export const TEXT_MODEL_CHOICES: readonly ModelChoice[] = [
   { alias: 'localllm-fast', label: 'Qwen3 8B · Fast' },
   { alias: 'localllm-balanced', label: 'Qwen3 8B · Q8' },
   { alias: 'localllm-deep', label: 'Qwen3 30B · Deep' },
+  { alias: 'localllm-code', label: 'Qwen3-Coder 30B · Code' },
   { alias: 'localllm-max', label: 'Qwen3 30B · Q8' },
   { alias: 'localllm-pocket', label: 'Qwen3 4B · Pocket' },
   { alias: 'qwen3:4b-q8_0', label: 'Qwen3 4B · Q8' },

@@ -98,6 +98,24 @@ def test_catalog_and_openai_model_aliases() -> None:
         assert "localllm-fast" in ids
 
 
+def test_installed_coder_is_exposed_by_exact_id_and_stable_alias() -> None:
+    class FakeCoderOllama(FakeOllama):
+        async def tags(self) -> list[dict[str, Any]]:
+            return [{"name": "qwen3-coder:30b-a3b-q4_K_M", "size": 19_000_000_000}]
+
+    with TestClient(app) as client:
+        client.app.state.ollama = FakeCoderOllama()
+        response = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer local-dev-key"},
+        )
+
+    assert response.status_code == 200
+    ids = {model["id"] for model in response.json()["data"]}
+    assert "qwen3-coder:30b-a3b-q4_K_M" in ids
+    assert "localllm-code" in ids
+
+
 def test_model_catalog_degrades_explicitly_but_openai_models_return_503() -> None:
     class UnavailableCatalog(FakeOllama):
         async def tags(self) -> list[dict[str, Any]]:

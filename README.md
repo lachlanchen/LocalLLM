@@ -25,7 +25,7 @@ The application is useful before every model is downloaded: system diagnostics, 
 | Playground | Resumable streaming chat, local-first Auto routing, image attachments, GFM/KaTeX rendering, and collapsed Agent/Image capability panels |
 | Vision Lab | OCR, screenshot review, diagram reading, and visual question answering |
 | Deep Research | Multi-query web search, page extraction, cited synthesis, and uncertainty tracking |
-| Model Shelf | Ten curated Q4/Q8 text, MoE, vision/Vision XL, and embedding tags with download progress, installed state, and stable aliases |
+| Model Shelf | Eleven curated Q4/Q8 text, MoE, coding, vision/Vision XL, and embedding tags with download progress, installed state, and stable aliases |
 | Binary Studio | Static upload triage plus a read-only Ghidra/MCP investigator with mutation tools blocked |
 | API Desk | Copy-ready examples for Chat Completions, Responses, vision inputs, embeddings, and models |
 
@@ -49,8 +49,15 @@ In a second terminal, pull the three practical daily models plus multilingual em
 scripts/pull-models.sh core
 ```
 
-Pull all ten requested Ollama artifacts: every Q4/Q8 comparison model, the
-30B-A3B Vision XL model, and multilingual embeddings (about 109 GB):
+Pull the optional coding specialist by itself (about 19 GB), without changing
+the practical `core` baseline:
+
+```bash
+scripts/pull-models.sh code
+```
+
+Pull all eleven curated Ollama artifacts: every Q4/Q8 comparison model, the
+30B-A3B coding and Vision XL models, and multilingual embeddings (about 128 GB):
 
 ```bash
 scripts/pull-models.sh all
@@ -63,6 +70,7 @@ scripts/pull-models.sh all
 | Tiny and fast | `qwen3:4b-q4_K_M` / `qwen3:4b-q8_0` | 2.6 / 4.4 GB | `localllm-pocket` |
 | Daily assistant | `qwen3:8b-q4_K_M` / `qwen3:8b-q8_0` | 5.2 / 8.9 GB | `localllm-fast`, `localllm-balanced` |
 | Research and RE | `qwen3:30b-a3b-instruct-2507-q4_K_M` / `...q8_0` | 19 / 32 GB | `localllm-deep`, `localllm-max` |
+| Coding specialist | `qwen3-coder:30b-a3b-q4_K_M` | 19 GB | `localllm-code` |
 | Vision and OCR | `qwen3-vl:8b-instruct-q4_K_M` / `...q8_0` | 6.1 / 9.8 GB | `localllm-vision`, `localllm-vision-max` |
 | Vision XL | `qwen3-vl:30b-a3b-instruct-q4_K_M` | 20 GB | `localllm-vision-xl` |
 | Retrieval and RAG | `bge-m3:latest` | 1.2 GB | `localllm-embed` |

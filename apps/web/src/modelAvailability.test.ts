@@ -39,6 +39,18 @@ const models: ModelInfo[] = [
     recommended: false,
     installed: true,
   },
+  {
+    id: 'qwen3-coder:30b-a3b-q4_K_M',
+    family: 'Qwen3-Coder 30B-A3B',
+    quantization: 'Q4_K_M',
+    size_gb: 19,
+    context: 262144,
+    modalities: ['text', 'tools'],
+    tier: 'Code',
+    role: 'Repository implementation',
+    recommended: true,
+    installed: false,
+  },
 ]
 
 const catalog: CatalogResponse = {
@@ -50,11 +62,12 @@ const catalog: CatalogResponse = {
     'localllm-balanced': 'qwen3:8b-q8_0',
     'localllm-deep': 'qwen3:30b-a3b-instruct-2507-q4_K_M',
     'localllm-max': 'qwen3:30b-a3b-instruct-2507-q8_0',
+    'localllm-code': 'qwen3-coder:30b-a3b-q4_K_M',
     'localllm-vision': 'qwen3-vl:8b-instruct-q4_K_M',
     'localllm-vision-max': 'qwen3-vl:8b-instruct-q8_0',
     'localllm-vision-xl': 'qwen3-vl:30b-a3b-instruct-q4_K_M',
   },
-  planned_download_gb: 109.2,
+  planned_download_gb: 128.2,
 }
 
 describe('local model availability', () => {
@@ -80,6 +93,18 @@ describe('local model availability', () => {
   it('uses an installed vision quantization without falling back to text', () => {
     expect(chooseAvailableAlias(catalog, 'localllm-vision', 'vision')).toBe('localllm-vision-max')
     expect(isAliasInstalled(catalog, 'localllm-vision-max')).toBe(true)
+  })
+
+  it('exposes the coding alias only when its exact curated artifact is installed', () => {
+    expect(isAliasInstalled(catalog, 'localllm-code')).toBe(false)
+    const withCoder = {
+      ...catalog,
+      models: catalog.models.map((model) => model.id === 'qwen3-coder:30b-a3b-q4_K_M'
+        ? { ...model, installed: true }
+        : model),
+    }
+    expect(isAliasInstalled(withCoder, 'localllm-code')).toBe(true)
+    expect(modelChoiceStatuses(withCoder, 'text').some((choice) => choice.alias === 'localllm-code' && choice.installed)).toBe(true)
   })
 
   it('returns no choice when a modality has no installed model', () => {

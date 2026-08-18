@@ -84,6 +84,26 @@ async def test_proxy_json_closes_client_after_success(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_proxy_json_resolves_stable_coder_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    clients = install_mock_transport(monkeypatch, handler)
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
+
+    await ollama.proxy_json(
+        "/v1/chat/completions", {"model": "localllm-code", "messages": []}
+    )
+
+    assert seen_payload["model"] == "qwen3-coder:30b-a3b-q4_K_M"
+    assert len(clients) == 1
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
 async def test_proxy_json_closes_client_after_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

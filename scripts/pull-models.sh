@@ -21,6 +21,9 @@ vision_models=(
 embedding_models=(
   bge-m3:latest
 )
+code_models=(
+  qwen3-coder:30b-a3b-q4_K_M
+)
 core_models=(
   qwen3:8b-q4_K_M
   qwen3-vl:8b-instruct-q4_K_M
@@ -37,6 +40,7 @@ all_models=(
   qwen3-vl:8b-instruct-q8_0
   qwen3-vl:30b-a3b-instruct-q4_K_M
   qwen3:30b-a3b-instruct-2507-q8_0
+  qwen3-coder:30b-a3b-q4_K_M
   bge-m3:latest
 )
 
@@ -53,6 +57,7 @@ case "$mode" in
   text) selected_models=("${text_models[@]}") ;;
   vision) selected_models=("${vision_models[@]}") ;;
   embedding) selected_models=("${embedding_models[@]}") ;;
+  code) selected_models=("${code_models[@]}") ;;
   all) selected_models=("${all_models[@]}") ;;
   status) exec "$ollama_bin" list ;;
   verify)
@@ -68,7 +73,7 @@ case "$mode" in
     done
     exit "$missing"
     ;;
-  *) echo "Usage: $0 {core|text|vision|embedding|all|status|verify}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {core|text|vision|embedding|code|all|status|verify}" >&2; exit 2 ;;
 esac
 
 for localllm_model in "${selected_models[@]}"; do

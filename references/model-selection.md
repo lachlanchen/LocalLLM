@@ -2,16 +2,17 @@
 
 ## Decision
 
-LocalLLM keeps five generation capability lanes and one retrieval model:
+LocalLLM keeps six generation capability lanes and one retrieval model:
 
 1. Qwen3 4B for small, low-latency experiments.
 2. Qwen3 8B for daily chat, coding, and fast tool loops.
 3. Qwen3 30B-A3B Instruct 2507 for deeper research and reverse engineering.
-4. Qwen3-VL 8B Instruct for fast screenshots, OCR, diagrams, and image Q&A.
-5. Qwen3-VL 30B-A3B Instruct Q4 for the higher-capability Vision XL lane.
-6. BGE-M3 for multilingual semantic search and the embeddings API.
+4. Qwen3-Coder 30B-A3B for repository implementation, debugging, and coding tool loops.
+5. Qwen3-VL 8B Instruct for fast screenshots, OCR, diagrams, and image Q&A.
+6. Qwen3-VL 30B-A3B Instruct Q4 for the higher-capability Vision XL lane.
+7. BGE-M3 for multilingual semantic search and the embeddings API.
 
-Q4_K_M is the default across all five generation lanes. Q8_0 remains available
+Q4_K_M is the default across all six generation lanes. Q8_0 remains available
 for the 4B, 8B, 30B-A3B text, and 8B vision comparison sets; Vision XL is
 currently Q4-only. Q8 is not part of the default `core` pull and is not
 automatically better for every task.
@@ -36,17 +37,18 @@ curl -fsS http://127.0.0.1:11434/api/tags | python3 -m json.tool
 | `qwen3:8b-q8_0` | 8.9 GB | 40K | one GPU |
 | `qwen3:30b-a3b-instruct-2507-q4_K_M` | 19 GB | 256K | one 4090 for moderate context; two when context/concurrency grows |
 | `qwen3:30b-a3b-instruct-2507-q8_0` | 32 GB | 256K | two 4090s |
+| `qwen3-coder:30b-a3b-q4_K_M` | 19 GB | 256K | one 4090 for moderate context; two when context/concurrency grows |
 | `qwen3-vl:8b-instruct-q4_K_M` | 6.1 GB | 256K | one GPU |
 | `qwen3-vl:8b-instruct-q8_0` | 9.8 GB | 256K | one GPU |
 | `qwen3-vl:30b-a3b-instruct-q4_K_M` | 20 GB | 256K | one 4090 at modest context; two as cache/vision load grows |
 | `bge-m3:latest` | 1.2 GB | 8K | CPU or one GPU; 1024-dimensional embeddings |
 
-The complete `all` profile is ten raw Ollama tags—six text, three vision
-including the 30B-A3B Vision XL Q4 tag, and one embedding model—and is
-approximately 109.2 GB before filesystem overhead. All ten were installed on
-the validated dual-4090 host recorded in the
-[post-reboot verification addendum](verification-report.md#gpu-and-expanded-api-inventory).
-The `core` set—8B Q4, 30B Q4, VL 8B Q4, and BGE-M3—is approximately 31.5 GB.
+The complete `all` profile is eleven raw Ollama tags—six general text, one
+coding specialist, three vision including the 30B-A3B Vision XL Q4 tag, and one
+embedding model—and is approximately 128.2 GB before filesystem overhead. The
+separate `code` profile pulls only the 19 GB coding specialist. The `core`
+set—8B Q4, 30B Q4, VL 8B Q4, and BGE-M3—remains unchanged at approximately
+31.5 GB; adding a specialist never silently expands that practical baseline.
 
 ## Context is not free
 
@@ -103,9 +105,11 @@ before trusting benchmarks.
 - [Qwen3 4B GGUF model card](https://huggingface.co/Qwen/Qwen3-4B-GGUF)
 - [Qwen3 8B GGUF model card](https://huggingface.co/Qwen/Qwen3-8B-GGUF)
 - [Qwen3 30B-A3B Instruct 2507 model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)
+- [Qwen3-Coder model card](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct)
 - [Qwen3-VL 8B Instruct GGUF model card](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF)
 - [Qwen3-VL 30B-A3B Instruct model card](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct)
 - [Ollama Qwen3 tags](https://ollama.com/library/qwen3/tags)
+- [Ollama Qwen3-Coder tags](https://ollama.com/library/qwen3-coder/tags)
 - [Ollama Qwen3-VL tags](https://ollama.com/library/qwen3-vl/tags)
 - [Ollama BGE-M3](https://ollama.com/library/bge-m3)
 - [BAAI BGE-M3 model card](https://huggingface.co/BAAI/bge-m3)

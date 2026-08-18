@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from localllm.config import Settings, prepare_private_data_dir
+from localllm.config import Settings, get_settings, prepare_private_data_dir
+
+
+def test_cached_application_settings_use_the_hermetic_test_key() -> None:
+    assert get_settings().api_key == "local-dev-key"
 
 
 def test_allowed_origins_accept_json_environment_value(monkeypatch) -> None:
