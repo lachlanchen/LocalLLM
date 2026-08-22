@@ -6,6 +6,7 @@ import json
 import math
 import re
 import time
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, Literal, TypeVar
 
@@ -126,7 +127,12 @@ class _RequestBodyTooLarge(BaseException):
     """Private receive-channel sentinel that inner exception middleware cannot consume."""
 
 
+class _ClientDisconnected(Exception):
+    """The downstream client disconnected while an upstream request was starting."""
+
+
 RequestModel = TypeVar("RequestModel", bound=BaseModel)
+UpstreamResult = TypeVar("UpstreamResult")
 MAX_SEARCH_JSON_BYTES = 16 * 1024
 MAX_RESEARCH_JSON_BYTES = 32 * 1024
 MAX_OPENAI_JSON_BYTES = 25 * 1024 * 1024
@@ -621,7 +627,7 @@ async def pull_model(
 @app.post("/api/chat/completions")
 async def app_chat(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
     payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
-    return await _proxy_openai("/v1/chat/completions", payload, ollama)
+    return await _proxy_openai(request, "/v1/chat/completions", payload, ollama)
 
 
 @app.get("/api/conversations")
@@ -902,7 +908,6 @@ async def list_models(ollama: OllamaClient = Depends(get_ollama)) -> Response:
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": "localllm",
-                    "target": target,
                 }
             )
     return JSONResponse(content={"object": "list", "data": data})
@@ -922,11 +927,56 @@ async def retrieve_model(model: str, ollama: OllamaClient = Depends(get_ollama))
     return _passthrough(response)
 
 
-async def _proxy_openai(endpoint: str, payload: dict[str, Any], ollama: OllamaClient) -> Response:
+async def _cancel_and_wait(task: asyncio.Future[Any]) -> None:
+    """Cancel a losing task, consume its result, and close a raced stream if necessary."""
+
+    task.cancel()
+    try:
+        result = await task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+    if isinstance(result, OllamaStream):
+        try:
+            await result.aclose()
+        except Exception:
+            pass
+
+
+async def _await_upstream_or_disconnect(
+    request: Request, operation: Awaitable[UpstreamResult]
+) -> UpstreamResult:
+    upstream_task = asyncio.ensure_future(operation)
+    try:
+        while True:
+            if await request.is_disconnected():
+                await _cancel_and_wait(upstream_task)
+                raise _ClientDisconnected
+            done, _pending = await asyncio.wait({upstream_task}, timeout=0.05)
+            if upstream_task in done:
+                return await upstream_task
+    except BaseException:
+        if not upstream_task.done():
+            await _cancel_and_wait(upstream_task)
+        raise
+
+
+async def _proxy_openai(
+    request: Request, endpoint: str, payload: dict[str, Any], ollama: OllamaClient
+) -> Response:
     try:
         if payload.get("stream"):
-            return await _streaming_passthrough(await ollama.proxy_stream(endpoint, payload))
-        return _passthrough(await ollama.proxy_json(endpoint, payload))
+            stream = await _await_upstream_or_disconnect(
+                request, ollama.proxy_stream(endpoint, payload)
+            )
+            return await _streaming_passthrough(stream)
+        response = await _await_upstream_or_disconnect(
+            request, ollama.proxy_json(endpoint, payload)
+        )
+        return _passthrough(response)
+    except _ClientDisconnected:
+        return _openai_error(499, "Client closed request", "request_cancelled")
     except HTTPException as exc:
         return _openai_error(exc.status_code, str(exc.detail), "service_unavailable")
 
@@ -936,19 +986,19 @@ async def chat_completions(
     request: Request, ollama: OllamaClient = Depends(get_ollama)
 ) -> Response:
     payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
-    return await _proxy_openai("/v1/chat/completions", payload, ollama)
+    return await _proxy_openai(request, "/v1/chat/completions", payload, ollama)
 
 
 @app.post("/v1/responses", dependencies=[Depends(require_api_key)])
 async def responses(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
     payload = await _bounded_json_object(request, MAX_OPENAI_JSON_BYTES)
-    return await _proxy_openai("/v1/responses", payload, ollama)
+    return await _proxy_openai(request, "/v1/responses", payload, ollama)
 
 
 @app.post("/v1/embeddings", dependencies=[Depends(require_api_key)])
 async def embeddings(request: Request, ollama: OllamaClient = Depends(get_ollama)) -> Response:
     payload = await _bounded_json_object(request, 8 * 1024 * 1024)
-    return await _proxy_openai("/v1/embeddings", payload, ollama)
+    return await _proxy_openai(request, "/v1/embeddings", payload, ollama)
 
 
 project_root = find_project_root()

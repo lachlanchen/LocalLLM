@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 
@@ -154,5 +155,44 @@ async def test_proxy_stream_closes_client_after_preflight_error(
         await ollama.proxy_stream("/v1/chat/completions", {"model": "missing", "stream": True})
 
     assert exc_info.value.status_code == 503
+    assert len(clients) == 1
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_proxy_closes_client_when_caller_cancels_preflight(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    started = asyncio.Event()
+    blocker = asyncio.Event()
+    clients: list[httpx.AsyncClient] = []
+    real_client = httpx.AsyncClient
+
+    class BlockingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            started.set()
+            await blocker.wait()
+            return httpx.Response(200, json={"ok": True})
+
+    def client_factory(*args, **kwargs):
+        client = real_client(*args, transport=BlockingTransport(), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("localllm.ollama.httpx.AsyncClient", client_factory)
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
+    payload = {"model": "localllm-fast", "messages": [], "stream": stream}
+    if stream:
+        operation = ollama.proxy_stream("/v1/chat/completions", payload)
+    else:
+        operation = ollama.proxy_json("/v1/chat/completions", payload)
+    task = asyncio.create_task(operation)
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
     assert len(clients) == 1
     assert clients[0].is_closed

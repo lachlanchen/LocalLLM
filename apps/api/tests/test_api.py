@@ -1,12 +1,14 @@
+import asyncio
+import json
 from typing import Any
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from localllm.catalog import MODEL_CATALOG
-from localllm.main import app
+from localllm.main import _proxy_openai, app
 
 
 class FakeOllama:
@@ -93,9 +95,59 @@ def test_catalog_and_openai_model_aliases() -> None:
 
         authorized = client.get("/v1/models", headers={"Authorization": "bearer local-dev-key"})
         assert authorized.status_code == 200
-        ids = {model["id"] for model in authorized.json()["data"]}
+        model_list = authorized.json()
+        assert set(model_list) == {"object", "data"}
+        assert all(
+            set(model) == {"id", "object", "created", "owned_by"}
+            for model in model_list["data"]
+        )
+        ids = {model["id"] for model in model_list["data"]}
         assert "qwen3:8b-q4_K_M" in ids
         assert "localllm-fast" in ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_proxy_cancels_preheader_upstream_after_client_disconnect(stream: bool) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def receive_disconnect() -> dict[str, str]:
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    class BlockingOllama:
+        async def _wait(self) -> Any:
+            started.set()
+            try:
+                await blocker.wait()
+            finally:
+                cancelled.set()
+
+        async def proxy_stream(self, endpoint: str, payload: dict[str, Any]) -> Any:
+            return await self._wait()
+
+        async def proxy_json(self, endpoint: str, payload: dict[str, Any]) -> Any:
+            return await self._wait()
+
+    response = await _proxy_openai(
+        Request({"type": "http"}, receive_disconnect),
+        "/v1/chat/completions",
+        {"model": "localllm-fast", "messages": [], "stream": stream},
+        BlockingOllama(),  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 499
+    assert json.loads(response.body) == {
+        "error": {
+            "message": "Client closed request",
+            "type": "request_cancelled",
+            "param": None,
+            "code": None,
+        }
+    }
+    assert cancelled.is_set()
 
 
 def test_installed_coder_is_exposed_by_exact_id_and_stable_alias() -> None:
