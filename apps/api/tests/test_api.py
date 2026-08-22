@@ -1,9 +1,11 @@
 import asyncio
 import json
+import socket
 from typing import Any
 
 import httpx
 import pytest
+import uvicorn
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
@@ -150,6 +152,97 @@ async def test_proxy_cancels_preheader_upstream_after_client_disconnect(stream: 
     assert cancelled.is_set()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_real_asgi_disconnect_cancels_preheader_upstream(stream: bool) -> None:
+    class BlockingOllama:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def _wait(self) -> None:
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+        async def proxy_stream(self, endpoint: str, payload: dict[str, Any]) -> FakeStream:
+            await self._wait()
+            return FakeStream(200, {"ok": True})
+
+        async def proxy_json(self, endpoint: str, payload: dict[str, Any]) -> httpx.Response:
+            await self._wait()
+            request = httpx.Request("POST", f"http://ollama.test{endpoint}")
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    listener.setblocking(False)
+    port = int(listener.getsockname()[1])
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="critical",
+            access_log=False,
+            lifespan="on",
+            timeout_graceful_shutdown=1,
+        )
+    )
+    server_task = asyncio.create_task(server.serve(sockets=[listener]))
+    fake = BlockingOllama()
+    writer: asyncio.StreamWriter | None = None
+    try:
+        async def wait_until_started() -> None:
+            while not server.started:
+                if server_task.done():
+                    await server_task
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_until_started(), timeout=2)
+        app.state.ollama = fake
+        _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        body = json.dumps(
+            {"model": "localllm-fast", "messages": [], "stream": stream}
+        ).encode()
+        request = (
+            b"POST /v1/chat/completions HTTP/1.1\r\n"
+            + f"Host: 127.0.0.1:{port}\r\n".encode()
+            + b"Authorization: Bearer local-dev-key\r\n"
+            + b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            + body
+        )
+        writer.write(request)
+        await writer.drain()
+        await asyncio.wait_for(fake.started.wait(), timeout=1)
+        writer.close()
+        await writer.wait_closed()
+        writer = None
+
+        await asyncio.wait_for(fake.cancelled.wait(), timeout=2)
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        fake.release.set()
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(asyncio.shield(server_task), timeout=3)
+        except TimeoutError:
+            server.force_exit = True
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+        listener.close()
+
+
 def test_installed_coder_is_exposed_by_exact_id_and_stable_alias() -> None:
     class FakeCoderOllama(FakeOllama):
         async def tags(self) -> list[dict[str, Any]]:
@@ -264,6 +357,7 @@ def test_successful_stream_is_forwarded_and_closed() -> None:
             body = b"".join(response.iter_bytes())
 
     assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
     assert b'"id":"chatcmpl_test"' in body
     assert b"data: [DONE]" in body
     assert stream.closed

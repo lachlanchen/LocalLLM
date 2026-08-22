@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .agent_runtime import router as agent_runtime_router
@@ -276,6 +277,89 @@ class RequestBodyLimitMiddleware:
             release_slot()
 
 
+class BrowserSecurityBoundaryMiddleware:
+    """Enforce the browser boundary without hiding ASGI disconnect messages."""
+
+    _SECURITY_HEADERS = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Content-Security-Policy": (
+            "default-src 'self'; connect-src 'self'; font-src 'self' data:; "
+            "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        ),
+    }
+
+    def __init__(self, app: ASGIApp, allowed_origins: list[str]) -> None:
+        self.app = app
+        self.allowed_origins = frozenset(allowed_origins)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get("client")
+        peer = str(client[0]) if client else ""
+        if peer and peer != "testclient":
+            try:
+                if not ipaddress.ip_address(peer).is_loopback:
+                    response = JSONResponse(
+                        status_code=403, content={"detail": "Loopback access only"}
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=403, content={"detail": "Loopback access only"}
+                )
+                await response(scope, receive, send)
+                return
+
+        path = str(scope.get("path", ""))
+        method = str(scope.get("method", ""))
+        request_headers = Headers(scope=scope)
+        api_request = path.startswith(("/api/", "/v1/"))
+        if api_request or method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request_headers.get("origin")
+            fetch_site = request_headers.get("sec-fetch-site", "").lower()
+            if (origin and origin not in self.allowed_origins) or fetch_site == "cross-site":
+                response = JSONResponse(
+                    status_code=403, content={"detail": "Cross-site request blocked"}
+                )
+                await response(scope, receive, send)
+                return
+
+        if method == "POST" and path == "/api/re/inspect":
+            content_length = request_headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_UPLOAD_REQUEST_SIZE:
+                        response = JSONResponse(
+                            status_code=413,
+                            content={"detail": "Upload request exceeds the binary inspection limit"},
+                        )
+                        await response(scope, receive, send)
+                        return
+                except ValueError:
+                    response = JSONResponse(
+                        status_code=400, content={"detail": "Invalid Content-Length"}
+                    )
+                    await response(scope, receive, send)
+                    return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message.get("type") == "http.response.start":
+                response_headers = MutableHeaders(scope=message)
+                for name, value in self._SECURITY_HEADERS.items():
+                    response_headers[name] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
 def _bounded_json_integer(value: str) -> int:
     if len(value) > 256:
         raise ValueError("JSON integer is too long")
@@ -394,47 +478,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-LocalLLM-Key"],
 )
-
-
-@app.middleware("http")
-async def browser_security_boundary(request: Request, call_next):
-    """Reject cross-site browser mutations and add local-app security headers."""
-    peer = request.client.host if request.client else ""
-    if peer and peer != "testclient":
-        try:
-            if not ipaddress.ip_address(peer).is_loopback:
-                return JSONResponse(status_code=403, content={"detail": "Loopback access only"})
-        except ValueError:
-            return JSONResponse(status_code=403, content={"detail": "Loopback access only"})
-    api_request = request.url.path.startswith(("/api/", "/v1/"))
-    if api_request or request.method not in {"GET", "HEAD", "OPTIONS"}:
-        origin = request.headers.get("origin")
-        fetch_site = request.headers.get("sec-fetch-site", "").lower()
-        if (origin and origin not in allowed_origins) or fetch_site == "cross-site":
-            return JSONResponse(status_code=403, content={"detail": "Cross-site request blocked"})
-    if request.method == "POST" and request.url.path == "/api/re/inspect":
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > MAX_UPLOAD_REQUEST_SIZE:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": "Upload request exceeds the binary inspection limit"},
-                    )
-            except ValueError:
-                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
-
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; connect-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; "
-        "style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; "
-        "frame-ancestors 'none'"
-    )
-    return response
+app.add_middleware(BrowserSecurityBoundaryMiddleware, allowed_origins=allowed_origins)
 
 
 app.include_router(grounded_chat_router)
