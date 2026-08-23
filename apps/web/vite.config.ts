@@ -8,8 +8,9 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8008',
       '/healthz': 'http://127.0.0.1:8008',
+      '/livez': 'http://127.0.0.1:8008',
+      '/readyz': 'http://127.0.0.1:8008',
       '/v1': 'http://127.0.0.1:8008',
     },
   },
 })
-

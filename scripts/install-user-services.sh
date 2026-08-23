@@ -74,7 +74,7 @@ wait_for_http_ready() {
   for ((attempt = 1; attempt <= readiness_attempts; attempt++)); do
     if last_error="$(
       curl --fail --silent --show-error \
-        --connect-timeout 1 --max-time 2 --output /dev/null "$url" 2>&1
+        --connect-timeout 1 --max-time 3 --output /dev/null "$url" 2>&1
     )"; then
       echo "$label ready: $url (attempt $attempt/$readiness_attempts)"
       return 0
@@ -193,5 +193,5 @@ if ! systemctl --user restart localllm-api.service; then
   exit 1
 fi
 wait_for_http_ready \
-  "LocalLLM API" "http://127.0.0.1:8008/healthz" "localllm-api.service"
+  "LocalLLM API" "http://127.0.0.1:8008/readyz" "localllm-api.service"
 systemctl --user --no-pager --full status localllm-ollama.service localllm-api.service

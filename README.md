@@ -308,7 +308,7 @@ Read [the complete operator workflow](references/reverse-engineering-workflow.md
 ## Development and validation
 
 ```bash
-# Frontend development server (proxies /api, /v1, and /healthz to port 8008)
+# Frontend development server (proxies /api, /v1, and status routes to port 8008)
 npm run dev
 
 # Backend
@@ -338,7 +338,18 @@ uv run --project apps/api --extra dev python scripts/browser-smoke.py
 scripts/launch-novnc.sh stop
 ```
 
-For a persistent local service, run `scripts/install-user-services.sh`. It installs two user-level systemd units; it does not require root. On a fixed dual-GPU workstation, set `LOCALLLM_EXPECTED_GPU_COUNT=2` in `.env` first. The installer renders the whitelisted GPU settings—including the practical 65,536-token default context—into the Ollama unit, disables Ollama cloud features, bounds loaded models/queue/parallelism, waits for both cards, and verifies Ollama's startup inventory. Rerun it after changing those settings.
+For a persistent local service, first pull the models named by
+`LOCALLLM_REQUIRED_MODELS` (the default matches `scripts/pull-models.sh core`),
+then run `scripts/install-user-services.sh`. It installs two user-level systemd
+units; it does not require root. On a fixed dual-GPU workstation, set
+`LOCALLLM_EXPECTED_GPU_COUNT=2` in `.env` first. The installer renders the
+whitelisted GPU settings—including the practical 65,536-token default
+context—into the Ollama unit, disables Ollama cloud features, bounds loaded
+models/queue/parallelism, waits for both cards, verifies Ollama's startup
+inventory, and admits the API only after `/readyz` confirms Ollama plus every
+required model. A role-specific compute node can narrow the required-model
+list; see [node liveness, readiness, and capabilities](references/node-capabilities.md).
+Rerun the installer after changing those settings.
 
 ## Privacy and safety
 
@@ -404,6 +415,7 @@ For a persistent local service, run `scripts/install-user-services.sh`. It insta
 - [Reference index](references/README.md)
 - [Historical verification baseline and completed post-reboot addendum](references/verification-report.md)
 - [Model selection and dual-4090 layout](references/model-selection.md)
+- [Node liveness, readiness, and capabilities](references/node-capabilities.md)
 - [Pinned llama.cpp CUDA alternative](references/llama-cpp.md)
 - [Deep Research design](references/deep-research.md)
 - [Federated search and research API](references/search-research-api.md)

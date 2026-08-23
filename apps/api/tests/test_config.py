@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from localllm.config import Settings, get_settings, prepare_private_data_dir
+from localllm.config import (
+    DEFAULT_REQUIRED_MODELS,
+    Settings,
+    get_settings,
+    prepare_private_data_dir,
+)
 
 
 def test_cached_application_settings_use_the_hermetic_test_key() -> None:
@@ -23,6 +28,45 @@ def test_allowed_origins_accept_comma_separated_environment_value(monkeypatch) -
     settings = Settings(_env_file=None)
 
     assert settings.allowed_origins == ["https://one.test", "https://two.test"]
+
+
+def test_required_models_default_to_the_core_pull_contract() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.required_models == list(DEFAULT_REQUIRED_MODELS)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('["localllm-fast","localllm-vision"]', ["localllm-fast", "localllm-vision"]),
+        (
+            "localllm-fast, qwen3-vl:8b-instruct-q4_K_M",
+            [
+                "localllm-fast",
+                "qwen3-vl:8b-instruct-q4_K_M",
+            ],
+        ),
+        ("", []),
+    ],
+)
+def test_required_models_accept_json_csv_or_an_explicit_empty_list(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: list[str]
+) -> None:
+    monkeypatch.setenv("LOCALLLM_REQUIRED_MODELS", raw)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.required_models == expected
+
+
+@pytest.mark.parametrize(
+    "required_models",
+    [["https://remote.example/model"], ["model with spaces"], ["model\nname"]],
+)
+def test_required_models_reject_non_local_identifier_shapes(required_models: list[str]) -> None:
+    with pytest.raises(ValueError, match="local model ID syntax"):
+        Settings(required_models=required_models, _env_file=None)
 
 
 def test_non_loopback_binding_is_rejected() -> None:

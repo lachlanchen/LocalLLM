@@ -15,7 +15,11 @@ printf '\nOllama:\n'
 curl -fsS http://127.0.0.1:11434/api/version 2>&1 || true
 if [[ -x "$ollama_bin" ]]; then "$ollama_bin" list 2>&1 || true; fi
 printf '\nApplication:\n'
-curl -fsS http://127.0.0.1:8008/healthz 2>&1 || true
+printf 'Liveness: '
+curl -sS http://127.0.0.1:8008/livez 2>&1 || true
+printf '\nReadiness: '
+curl -sS http://127.0.0.1:8008/readyz 2>&1 || true
+printf '\n'
 printf '\nReverse engineering:\n'
 [[ -x "$project_root/.local/opt/ghidra_12.0.3_PUBLIC/ghidraRun" ]] && echo "Ghidra ready"
 if [[ -x "$project_root/.venv-tools/bin/python" ]]; then

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from functools import lru_cache
 from pathlib import Path
@@ -10,6 +11,14 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
+DEFAULT_REQUIRED_MODELS = (
+    "localllm-fast",
+    "localllm-deep",
+    "localllm-vision",
+    "localllm-embed",
+)
 
 
 def prepare_private_data_dir(path: Path) -> Path:
@@ -54,6 +63,13 @@ class Settings(BaseSettings):
         "testserver",
     ]
     ollama_base_url: str = "http://127.0.0.1:11434"
+    # Readiness is an operator contract, not merely a process check. The default
+    # matches ``scripts/pull-models.sh core``; role-specific compute nodes can
+    # narrow this list, while an explicit empty list requires only Ollama's
+    # model catalog to be reachable.
+    required_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_REQUIRED_MODELS)
+    )
     ghidra_home: Path = Path("./.local/opt/ghidra_12.0.3_PUBLIC")
     oghidra_home: Path = Path("./.local/tools/OGhidra")
     pyghidra_mcp_url: str = "http://127.0.0.1:18765/mcp"
@@ -82,14 +98,30 @@ class Settings(BaseSettings):
     search_provider_timeout_seconds: float = Field(default=12.0, ge=2.0, le=30.0)
     search_response_limit_bytes: int = Field(default=2_000_000, ge=100_000, le=5_000_000)
 
-    @field_validator("allowed_origins", "allowed_hosts", mode="before")
+    @field_validator("allowed_origins", "allowed_hosts", "required_models", mode="before")
     @classmethod
-    def parse_origins(cls, value: object) -> object:
+    def parse_list_setting(cls, value: object) -> object:
         if isinstance(value, str):
             if value.lstrip().startswith("["):
                 return json.loads(value)
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("required_models")
+    @classmethod
+    def validate_required_models(cls, value: list[str]) -> list[str]:
+        if len(value) > 32:
+            raise ValueError("At most 32 required models may be configured")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for model in value:
+            candidate = model.strip()
+            if "://" in candidate or not _MODEL_ID.fullmatch(candidate):
+                raise ValueError("Required model identifiers must use the local model ID syntax")
+            if candidate not in seen:
+                normalized.append(candidate)
+                seen.add(candidate)
+        return normalized
 
     @field_validator("ollama_base_url")
     @classmethod
