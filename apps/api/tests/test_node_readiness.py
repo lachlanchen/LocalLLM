@@ -131,10 +131,22 @@ def test_node_capabilities_contract_is_versioned_and_reports_actual_models() -> 
         "error_code": None,
     }
     assert [protocol["id"] for protocol in payload["protocols"]] == [
+        "openai.models.list.v1",
+        "openai.models.retrieve.v1",
         "openai.chat-completions.v1",
         "openai.responses.v1",
         "openai.embeddings.v1",
     ]
+    advertised_routes = {
+        (protocol["method"], protocol["path"]) for protocol in payload["protocols"]
+    }
+    implemented_routes = {
+        (method, path.replace("{model:path}", "{model}"))
+        for route in app.routes
+        if (path := getattr(route, "path", "")).startswith("/v1/")
+        for method in getattr(route, "methods", set())
+    }
+    assert advertised_routes == implemented_routes
     fast = next(model for model in payload["models"] if model["id"] == "qwen3:8b-q4_K_M")
     custom = next(model for model in payload["models"] if model["id"] == "custom/model:latest")
     assert fast["aliases"] == ["localllm-fast"]

@@ -16,6 +16,20 @@ _ALIASES_BY_TARGET = {
 
 _PROTOCOLS: tuple[dict[str, Any], ...] = (
     {
+        "id": "openai.models.list.v1",
+        "method": "GET",
+        "path": "/v1/models",
+        "authentication": "bearer",
+        "streaming": False,
+    },
+    {
+        "id": "openai.models.retrieve.v1",
+        "method": "GET",
+        "path": "/v1/models/{model}",
+        "authentication": "bearer",
+        "streaming": False,
+    },
+    {
         "id": "openai.chat-completions.v1",
         "method": "POST",
         "path": "/v1/chat/completions",
