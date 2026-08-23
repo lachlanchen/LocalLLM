@@ -41,6 +41,7 @@ from .conversations import (
 from .grounded_chat import router as grounded_chat_router
 from .image_generation import router as image_generation_router
 from .mcp_bridge import investigate_with_mcp, mcp_status
+from .node_contract import node_capabilities_document, readiness_document
 from .ollama import OllamaClient, OllamaStream
 from .research import ResearchCapacityError, ResearchManager
 from .reverse_engineering import (
@@ -607,8 +608,46 @@ async def _streaming_passthrough(stream: OllamaStream) -> Response:
 
 @app.get("/healthz")
 async def health(ollama: OllamaClient = Depends(get_ollama)) -> dict[str, Any]:
+    """Compatibility health document; callers must use /readyz for admission."""
+
     state = await ollama.health()
     return {"ok": True, "service": "localllm-api", "ollama": state}
+
+
+@app.get("/livez")
+async def liveness() -> Response:
+    response = JSONResponse(
+        content={
+            "ok": True,
+            "status": "alive",
+            "service": {"name": "localllm-api", "version": app.version},
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/readyz")
+async def readiness(
+    current: Settings = Depends(get_settings), ollama: OllamaClient = Depends(get_ollama)
+) -> Response:
+    probe = await ollama.probe()
+    content = readiness_document(probe, current.required_models, app.version)
+    response = JSONResponse(content=content, status_code=200 if content["ok"] else 503)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/node/capabilities")
+async def node_capabilities(
+    current: Settings = Depends(get_settings), ollama: OllamaClient = Depends(get_ollama)
+) -> Response:
+    probe = await ollama.probe()
+    response = JSONResponse(
+        content=node_capabilities_document(probe, current.required_models, app.version)
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/system/status")

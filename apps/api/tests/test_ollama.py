@@ -64,6 +64,105 @@ async def test_tags_surfaces_ollama_outage(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_probe_returns_sorted_models_and_closes_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "qwen3-vl:8b-instruct-q4_K_M"},
+                    {"model": "qwen3:8b-q4_K_M"},
+                    {"name": "qwen3:8b-q4_K_M"},
+                ]
+            },
+        )
+
+    clients = install_mock_transport(monkeypatch, handler)
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
+
+    probe = await ollama.probe()
+
+    assert probe.ok is True
+    assert probe.models == ("qwen3-vl:8b-instruct-q4_K_M", "qwen3:8b-q4_K_M")
+    assert probe.error_code is None
+    assert len(clients) == 1
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "transport",
+        "status",
+        "malformed-json",
+        "malformed-catalog",
+        "malformed-entry",
+    ],
+)
+async def test_probe_fails_closed_with_a_stable_error_code(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "transport":
+            raise httpx.ConnectError("private transport detail", request=request)
+        if failure == "status":
+            return httpx.Response(503, text="private upstream detail")
+        if failure == "malformed-json":
+            return httpx.Response(200, content=b"not-json")
+        if failure == "malformed-catalog":
+            return httpx.Response(200, json={"models": {}})
+        return httpx.Response(200, json={"models": [{}]})
+
+    clients = install_mock_transport(monkeypatch, handler)
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
+
+    probe = await ollama.probe()
+
+    assert probe.ok is False
+    assert probe.models == ()
+    assert probe.error_code == "ollama_catalog_unavailable"
+    assert len(clients) == 1
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
+async def test_probe_closes_client_and_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    blocker = asyncio.Event()
+    clients: list[httpx.AsyncClient] = []
+    real_client = httpx.AsyncClient
+
+    class BlockingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            started.set()
+            await blocker.wait()
+            return httpx.Response(200, json={"models": []})
+
+    def client_factory(*args, **kwargs):
+        client = real_client(*args, transport=BlockingTransport(), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("localllm.ollama.httpx.AsyncClient", client_factory)
+    ollama = OllamaClient(Settings(ollama_base_url="http://127.0.0.1:11434"))
+    task = asyncio.create_task(ollama.probe())
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(clients) == 1
+    assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
 async def test_proxy_json_closes_client_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_payload: dict[str, object] = {}
 

@@ -44,6 +44,15 @@ class OllamaStream:
             await self.aclose()
 
 
+@dataclass(frozen=True)
+class OllamaProbe:
+    """Sanitized dependency state for readiness and node discovery."""
+
+    ok: bool
+    models: tuple[str, ...] = ()
+    error_code: str | None = None
+
+
 class OllamaClient:
     def __init__(self, settings: Settings):
         self.base_url = settings.ollama_base_url.rstrip("/")
@@ -57,6 +66,35 @@ class OllamaClient:
                 return {"ok": True, **response.json()}
         except (httpx.HTTPError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
+
+    async def probe(self) -> OllamaProbe:
+        """Verify that Ollama's model catalog is reachable and structurally valid.
+
+        A successful ``/api/tags`` response proves both runtime reachability and
+        catalog availability in one bounded request. Cancellation deliberately
+        propagates; the async context manager still closes its transport.
+        """
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(2.0, connect=1.0), trust_env=False
+            ) as client:
+                response = await client.get(f"{self.base_url}/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+                    raise ValueError("invalid Ollama model catalog")
+                names: set[str] = set()
+                for item in payload["models"]:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid Ollama model catalog entry")
+                    name = item.get("name") or item.get("model")
+                    if not isinstance(name, str) or not name:
+                        raise ValueError("invalid Ollama model catalog entry")
+                    names.add(name)
+                return OllamaProbe(ok=True, models=tuple(sorted(names)))
+        except (httpx.HTTPError, ValueError, TypeError):
+            return OllamaProbe(ok=False, error_code="ollama_catalog_unavailable")
 
     async def tags(self) -> list[dict[str, Any]]:
         try:

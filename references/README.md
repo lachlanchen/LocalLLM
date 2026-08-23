@@ -6,6 +6,7 @@ These notes preserve the design decisions, source trail, operational boundaries,
 | --- | --- |
 | [Verification report](verification-report.md) | reviewing the historical nine-model/pre-reboot baseline and the completed 2026-08-09 post-reboot service, dual-GPU, and Vision XL addendum |
 | [Model selection](model-selection.md) | choosing Q4/Q8, text/vision, one/two-GPU layouts, or context limits |
+| [Node capabilities](node-capabilities.md) | configuring role-specific required models or integrating liveness, readiness, and versioned compute-node discovery |
 | [llama.cpp runtime](llama-cpp.md) | building the pinned CUDA alternative runtime or serving a GGUF model on a loopback OpenAI-compatible API |
 | [Deep Research](deep-research.md) | understanding search, extraction, citations, limitations, and prompt-injection defenses |
 | [Search and Research API](search-research-api.md) | configuring federated web/paper providers or understanding Auto/Local/Web/Papers/All grounded chat and deep-research tasks |
