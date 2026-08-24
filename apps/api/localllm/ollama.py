@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -45,11 +46,21 @@ class OllamaStream:
 
 
 @dataclass(frozen=True)
+class OllamaModelMetadata:
+    """Sanitized installed-model provenance retained for node discovery."""
+
+    id: str
+    digest: str | None = None
+    size_bytes: int | None = None
+
+
+@dataclass(frozen=True)
 class OllamaProbe:
     """Sanitized dependency state for readiness and node discovery."""
 
     ok: bool
     models: tuple[str, ...] = ()
+    model_metadata: tuple[OllamaModelMetadata, ...] = ()
     error_code: str | None = None
 
 
@@ -85,14 +96,33 @@ class OllamaClient:
                 if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
                     raise ValueError("invalid Ollama model catalog")
                 names: set[str] = set()
+                metadata: dict[str, OllamaModelMetadata] = {}
                 for item in payload["models"]:
                     if not isinstance(item, dict):
                         raise ValueError("invalid Ollama model catalog entry")
                     name = item.get("name") or item.get("model")
                     if not isinstance(name, str) or not name:
                         raise ValueError("invalid Ollama model catalog entry")
+                    if name in names:
+                        raise ValueError("duplicate Ollama model catalog entry")
                     names.add(name)
-                return OllamaProbe(ok=True, models=tuple(sorted(names)))
+                    digest = item.get("digest")
+                    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                        digest = None
+                    size = item.get("size")
+                    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                        size = None
+                    metadata[name] = OllamaModelMetadata(
+                        id=name,
+                        digest=digest,
+                        size_bytes=size,
+                    )
+                ordered_names = tuple(sorted(names))
+                return OllamaProbe(
+                    ok=True,
+                    models=ordered_names,
+                    model_metadata=tuple(metadata[name] for name in ordered_names),
+                )
         except (httpx.HTTPError, ValueError, TypeError):
             return OllamaProbe(ok=False, error_code="ollama_catalog_unavailable")
 

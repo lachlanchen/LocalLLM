@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from localllm.config import Settings, get_settings
 from localllm.main import app, readiness
-from localllm.ollama import OllamaProbe
+from localllm.node_canary import atomic_write_canary_receipt, utc_timestamp
+from localllm.ollama import OllamaModelMetadata, OllamaProbe
 
 
 class ProbeOllama:
@@ -114,6 +115,18 @@ def test_node_capabilities_contract_is_versioned_and_reports_actual_models() -> 
                 OllamaProbe(
                     ok=True,
                     models=("custom/model:latest", "qwen3:8b-q4_K_M"),
+                    model_metadata=(
+                        OllamaModelMetadata(
+                            id="custom/model:latest",
+                            digest="a" * 64,
+                            size_bytes=123,
+                        ),
+                        OllamaModelMetadata(
+                            id="qwen3:8b-q4_K_M",
+                            digest="b" * 64,
+                            size_bytes=5_225_388_164,
+                        ),
+                    ),
                 )
             )
             response = client.get("/api/node/capabilities")
@@ -123,7 +136,8 @@ def test_node_capabilities_contract_is_versioned_and_reports_actual_models() -> 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     payload = response.json()
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
+    assert payload["service"]["release_id"] == "dev"
     assert payload["ready"] is False
     assert payload["runtime"] == {
         "provider": "ollama",
@@ -151,12 +165,28 @@ def test_node_capabilities_contract_is_versioned_and_reports_actual_models() -> 
     custom = next(model for model in payload["models"] if model["id"] == "custom/model:latest")
     assert fast["aliases"] == ["localllm-fast"]
     assert fast["modalities"] == ["text", "tools"]
+    assert fast["digest"] == "b" * 64
+    assert fast["size_bytes"] == 5_225_388_164
+    assert payload["functional_readiness"] == {
+        "required_for_catalog_readiness": False,
+        "ready": False,
+        "status": "not_configured",
+        "fresh": False,
+        "max_age_seconds": 86_400,
+        "timestamp": None,
+        "release_id": None,
+        "age_seconds": None,
+        "required_roles": ["text", "vision", "embedding"],
+        "roles": [],
+    }
     assert custom == {
         "id": "custom/model:latest",
         "aliases": [],
         "catalogued": False,
         "modalities": [],
         "context_tokens": None,
+        "digest": "a" * 64,
+        "size_bytes": 123,
     }
 
 
@@ -174,6 +204,110 @@ def test_node_capabilities_remains_discoverable_when_runtime_is_unready() -> Non
     assert response.status_code == 200
     assert response.json()["ready"] is False
     assert response.json()["models"] == []
+
+
+def test_node_capabilities_rechecks_canary_digest_against_current_probe(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    release_id = "01234567-89abcdef"
+    canary_dir = data_dir / "node-canaries"
+    canary_dir.mkdir(mode=0o700)
+    receipt_path = canary_dir / f"{release_id}.json"
+    timestamp = utc_timestamp()
+    digest = "a" * 64
+    atomic_write_canary_receipt(
+        {
+            "schema_version": 1,
+            "release_id": release_id,
+            "status": "passed",
+            "timestamp": timestamp,
+            "roles": [
+                {
+                    "role": "text",
+                    "status": "passed",
+                    "latency_ms": 12,
+                    "alias": "localllm-fast",
+                    "resolved_model": "qwen3:8b-q4_K_M",
+                    "digest": digest,
+                    "timestamp": timestamp,
+                }
+            ],
+        },
+        receipt_path,
+        data_dir,
+    )
+    settings = Settings(
+        data_dir=data_dir,
+        release_id=release_id,
+        required_models=["localllm-fast"],
+        node_canary_roles=["text"],
+        node_canary_receipt_path=receipt_path,
+        _env_file=None,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        with TestClient(app) as client:
+            client.app.state.ollama = ProbeOllama(
+                OllamaProbe(
+                    ok=True,
+                    models=("qwen3:8b-q4_K_M",),
+                    model_metadata=(
+                        OllamaModelMetadata(
+                            id="qwen3:8b-q4_K_M", digest=digest, size_bytes=5_200_000_000
+                        ),
+                    ),
+                )
+            )
+            matching = client.get("/api/node/capabilities")
+            client.app.state.ollama = ProbeOllama(
+                OllamaProbe(
+                    ok=True,
+                    models=("qwen3:8b-q4_K_M",),
+                    model_metadata=(
+                        OllamaModelMetadata(
+                            id="qwen3:8b-q4_K_M",
+                            digest="b" * 64,
+                            size_bytes=5_200_000_000,
+                        ),
+                    ),
+                )
+            )
+            repulled = client.get("/api/node/capabilities")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert matching.json()["functional_readiness"]["status"] == "passed"
+    assert matching.json()["functional_readiness"]["ready"] is True
+    assert repulled.json()["ready"] is True
+    assert repulled.json()["functional_readiness"]["status"] == "model_mismatch"
+    assert repulled.json()["functional_readiness"]["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_readyz_remains_catalog_only_when_configured_canary_is_missing(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    release_id = "01234567-89abcdef"
+    (data_dir / "node-canaries").mkdir(mode=0o700)
+    settings = Settings(
+        data_dir=data_dir,
+        release_id=release_id,
+        required_models=[],
+        node_canary_roles=["text"],
+        node_canary_receipt_path=(
+            data_dir / "node-canaries" / f"{release_id}.json"
+        ),
+        _env_file=None,
+    )
+
+    response = await readiness(
+        current=settings,
+        ollama=ProbeOllama(OllamaProbe(ok=True)),  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio

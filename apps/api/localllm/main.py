@@ -41,6 +41,7 @@ from .conversations import (
 from .grounded_chat import router as grounded_chat_router
 from .image_generation import router as image_generation_router
 from .mcp_bridge import investigate_with_mcp, mcp_status
+from .node_canary import ROLE_ALIASES, functional_readiness_document
 from .node_contract import node_capabilities_document, readiness_document
 from .ollama import OllamaClient, OllamaStream
 from .research import ResearchCapacityError, ResearchManager
@@ -643,8 +644,34 @@ async def node_capabilities(
     current: Settings = Depends(get_settings), ollama: OllamaClient = Depends(get_ollama)
 ) -> Response:
     probe = await ollama.probe()
+    installed = set(probe.models) if probe.ok else set()
+    metadata_by_id = {item.id: item for item in probe.model_metadata} if probe.ok else {}
+    current_model_provenance = {}
+    for role, alias in ROLE_ALIASES.items():
+        resolved_model = resolve_model(alias)
+        metadata = metadata_by_id.get(resolved_model)
+        if resolved_model in installed and metadata is not None:
+            current_model_provenance[role] = {
+                "resolved_model": resolved_model,
+                "digest": metadata.digest,
+            }
+    functional = await asyncio.to_thread(
+        functional_readiness_document,
+        current.node_canary_receipt_path,
+        current.data_dir,
+        current.node_canary_roles,
+        current.node_canary_max_age_seconds,
+        current.release_id,
+        current_model_provenance,
+    )
     response = JSONResponse(
-        content=node_capabilities_document(probe, current.required_models, app.version)
+        content=node_capabilities_document(
+            probe,
+            current.required_models,
+            app.version,
+            current.release_id,
+            functional_readiness=functional,
+        )
     )
     response.headers["Cache-Control"] = "no-store"
     return response

@@ -321,6 +321,9 @@ npm run build
 uv run --project apps/api ruff check apps/api/localllm apps/api/tests
 uv run --project apps/api pytest -q
 uv run --project apps/api --extra dev python scripts/verify-openai-api.py
+# Reads its key from LOCALLLM_API_KEY or --api-key-file; never pass the key value in argv.
+uv run --project apps/api --no-sync python scripts/verify-node-inference.py \
+  --roles text,code,vision,embedding
 scripts/verify-agent-sandbox.sh
 scripts/verify-image-generation.sh
 scripts/verify-re-toolchain.sh

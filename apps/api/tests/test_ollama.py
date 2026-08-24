@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from localllm.config import Settings
-from localllm.ollama import OllamaClient
+from localllm.ollama import OllamaClient, OllamaModelMetadata
 
 
 def install_mock_transport(
@@ -73,9 +73,16 @@ async def test_probe_returns_sorted_models_and_closes_client(
             200,
             json={
                 "models": [
-                    {"name": "qwen3-vl:8b-instruct-q4_K_M"},
-                    {"model": "qwen3:8b-q4_K_M"},
-                    {"name": "qwen3:8b-q4_K_M"},
+                    {
+                        "name": "qwen3-vl:8b-instruct-q4_K_M",
+                        "digest": "a" * 64,
+                        "size": 6_100_000_000,
+                    },
+                    {
+                        "model": "qwen3:8b-q4_K_M",
+                        "digest": "b" * 64,
+                        "size": 5_200_000_000,
+                    },
                 ]
             },
         )
@@ -87,6 +94,18 @@ async def test_probe_returns_sorted_models_and_closes_client(
 
     assert probe.ok is True
     assert probe.models == ("qwen3-vl:8b-instruct-q4_K_M", "qwen3:8b-q4_K_M")
+    assert probe.model_metadata == (
+        OllamaModelMetadata(
+            id="qwen3-vl:8b-instruct-q4_K_M",
+            digest="a" * 64,
+            size_bytes=6_100_000_000,
+        ),
+        OllamaModelMetadata(
+            id="qwen3:8b-q4_K_M",
+            digest="b" * 64,
+            size_bytes=5_200_000_000,
+        ),
+    )
     assert probe.error_code is None
     assert len(clients) == 1
     assert clients[0].is_closed
@@ -101,6 +120,7 @@ async def test_probe_returns_sorted_models_and_closes_client(
         "malformed-json",
         "malformed-catalog",
         "malformed-entry",
+        "duplicate-entry",
     ],
 )
 async def test_probe_fails_closed_with_a_stable_error_code(
@@ -115,6 +135,16 @@ async def test_probe_fails_closed_with_a_stable_error_code(
             return httpx.Response(200, content=b"not-json")
         if failure == "malformed-catalog":
             return httpx.Response(200, json={"models": {}})
+        if failure == "duplicate-entry":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "same:latest", "digest": "a" * 64},
+                        {"model": "same:latest", "digest": "b" * 64},
+                    ]
+                },
+            )
         return httpx.Response(200, json={"models": [{}]})
 
     clients = install_mock_transport(monkeypatch, handler)
@@ -124,6 +154,7 @@ async def test_probe_fails_closed_with_a_stable_error_code(
 
     assert probe.ok is False
     assert probe.models == ()
+    assert probe.model_metadata == ()
     assert probe.error_code == "ollama_catalog_unavailable"
     assert len(clients) == 1
     assert clients[0].is_closed

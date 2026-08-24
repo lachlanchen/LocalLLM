@@ -13,12 +13,16 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
+_RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+\-]{0,127}$")
+_IMMUTABLE_RELEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{8}$")
 DEFAULT_REQUIRED_MODELS = (
     "localllm-fast",
     "localllm-deep",
     "localllm-vision",
     "localllm-embed",
 )
+DEFAULT_NODE_CANARY_ROLES = ("text", "vision", "embedding")
+_NODE_CANARY_ROLES = frozenset({"text", "code", "vision", "embedding"})
 
 
 def prepare_private_data_dir(path: Path) -> Path:
@@ -49,6 +53,7 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8008
+    release_id: str = "dev"
     api_key: str = "local-dev-key"
     data_dir: Path = Path("./data")
     allowed_origins: Annotated[list[str], NoDecode] = [
@@ -70,6 +75,14 @@ class Settings(BaseSettings):
     required_models: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_REQUIRED_MODELS)
     )
+    # Functional evidence is deliberately separate from lightweight catalog
+    # readiness. The practical core profile does not promise the optional 19 GB
+    # coding specialist; a full workstation can opt into all four roles.
+    node_canary_roles: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_NODE_CANARY_ROLES)
+    )
+    node_canary_receipt_path: Path | None = None
+    node_canary_max_age_seconds: int = Field(default=86_400, ge=60, le=604_800)
     ghidra_home: Path = Path("./.local/opt/ghidra_12.0.3_PUBLIC")
     oghidra_home: Path = Path("./.local/tools/OGhidra")
     pyghidra_mcp_url: str = "http://127.0.0.1:18765/mcp"
@@ -98,7 +111,9 @@ class Settings(BaseSettings):
     search_provider_timeout_seconds: float = Field(default=12.0, ge=2.0, le=30.0)
     search_response_limit_bytes: int = Field(default=2_000_000, ge=100_000, le=5_000_000)
 
-    @field_validator("allowed_origins", "allowed_hosts", "required_models", mode="before")
+    @field_validator(
+        "allowed_origins", "allowed_hosts", "required_models", "node_canary_roles", mode="before"
+    )
     @classmethod
     def parse_list_setting(cls, value: object) -> object:
         if isinstance(value, str):
@@ -122,6 +137,31 @@ class Settings(BaseSettings):
                 normalized.append(candidate)
                 seen.add(candidate)
         return normalized
+
+    @field_validator("node_canary_roles")
+    @classmethod
+    def validate_node_canary_roles(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("At least one node canary role must be configured")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for role in value:
+            candidate = role.strip().lower()
+            if candidate not in _NODE_CANARY_ROLES:
+                raise ValueError("Node canary roles must use supported role names")
+            if candidate in seen:
+                raise ValueError("Node canary roles must be unique")
+            normalized.append(candidate)
+            seen.add(candidate)
+        return normalized
+
+    @field_validator("release_id")
+    @classmethod
+    def validate_release_id(cls, value: str) -> str:
+        candidate = value.strip()
+        if not _RELEASE_ID.fullmatch(candidate):
+            raise ValueError("LocalLLM release ID must use the bounded non-secret ID syntax")
+        return candidate
 
     @field_validator("ollama_base_url")
     @classmethod
@@ -152,6 +192,41 @@ class Settings(BaseSettings):
                 "127.0.0.1:8008; "
                 "add a separately authenticated access-control layer before any remote use"
             )
+        if self.node_canary_receipt_path is not None:
+            if not _IMMUTABLE_RELEASE_ID.fullmatch(self.release_id):
+                raise ValueError(
+                    "Configured node canary receipts require an immutable commit/archive release ID"
+                )
+            data_dir = Path(os.path.abspath(os.fspath(self.data_dir)))
+            receipt_path = Path(os.path.abspath(os.fspath(self.node_canary_receipt_path)))
+            expected_path = data_dir / "node-canaries" / f"{self.release_id}.json"
+            if receipt_path != expected_path:
+                raise ValueError(
+                    "Node canary receipt must use the dedicated release-bound data path"
+                )
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                descriptor = os.open(expected_path.parent, flags)
+            except OSError as exc:
+                raise ValueError(
+                    "Node canary receipt directory must already exist and be owner-private"
+                ) from exc
+            try:
+                entry = os.fstat(descriptor)
+                if (
+                    not stat.S_ISDIR(entry.st_mode)
+                    or entry.st_uid != os.getuid()
+                    or stat.S_IMODE(entry.st_mode) & 0o077
+                ):
+                    raise ValueError(
+                        "Node canary receipt directory must already exist and be owner-private"
+                    )
+            finally:
+                os.close(descriptor)
         return self
 
 

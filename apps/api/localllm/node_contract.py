@@ -6,7 +6,7 @@ from .catalog import MODEL_ALIASES, MODEL_CATALOG, resolve_model
 from .ollama import OllamaProbe
 
 READINESS_SCHEMA_VERSION = 1
-NODE_CAPABILITIES_SCHEMA_VERSION = 1
+NODE_CAPABILITIES_SCHEMA_VERSION = 2
 
 _CATALOG_BY_ID = {model["id"]: model for model in MODEL_CATALOG}
 _ALIASES_BY_TARGET = {
@@ -100,26 +100,49 @@ def readiness_document(
     }
 
 
-def _installed_model_contract(installed_model: str) -> dict[str, Any]:
+def _installed_model_contract(
+    installed_model: str, metadata_by_id: dict[str, Any]
+) -> dict[str, Any]:
     catalog_entry = _CATALOG_BY_ID.get(installed_model)
+    metadata = metadata_by_id.get(installed_model)
     return {
         "id": installed_model,
         "aliases": list(_ALIASES_BY_TARGET.get(installed_model, [])),
         "catalogued": catalog_entry is not None,
         "modalities": list(catalog_entry["modalities"]) if catalog_entry else [],
         "context_tokens": int(catalog_entry["context"]) if catalog_entry else None,
+        "digest": metadata.digest if metadata is not None else None,
+        "size_bytes": metadata.size_bytes if metadata is not None else None,
     }
 
 
 def node_capabilities_document(
-    probe: OllamaProbe, required_models: list[str], service_version: str
+    probe: OllamaProbe,
+    required_models: list[str],
+    service_version: str,
+    release_id: str,
+    functional_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     installed = set(probe.models) if probe.ok else set()
+    metadata_by_id = {item.id: item for item in probe.model_metadata} if probe.ok else {}
+    functional = functional_readiness or {
+        "required_for_catalog_readiness": False,
+        "ready": False,
+        "status": "not_configured",
+        "fresh": False,
+        "max_age_seconds": None,
+        "timestamp": None,
+        "release_id": None,
+        "age_seconds": None,
+        "required_roles": [],
+        "roles": [],
+    }
     return {
         "schema_version": NODE_CAPABILITIES_SCHEMA_VERSION,
         "service": {
             "name": "localllm-api",
             "version": service_version,
+            "release_id": release_id,
             "node_kind": "local-inference",
         },
         "ready": is_ready(probe, required_models),
@@ -129,6 +152,9 @@ def node_capabilities_document(
             "error_code": None if probe.ok else probe.error_code,
         },
         "required_models": required_model_states(required_models, installed),
+        "functional_readiness": functional,
         "protocols": [dict(protocol) for protocol in _PROTOCOLS],
-        "models": [_installed_model_contract(model) for model in sorted(installed)],
+        "models": [
+            _installed_model_contract(model, metadata_by_id) for model in sorted(installed)
+        ],
     }

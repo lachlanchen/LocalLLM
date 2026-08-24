@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from localllm.config import (
+    DEFAULT_NODE_CANARY_ROLES,
     DEFAULT_REQUIRED_MODELS,
     Settings,
     get_settings,
@@ -34,6 +35,100 @@ def test_required_models_default_to_the_core_pull_contract() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.required_models == list(DEFAULT_REQUIRED_MODELS)
+
+
+def test_functional_canary_defaults_match_the_practical_core_contract() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.release_id == "dev"
+    assert settings.node_canary_roles == list(DEFAULT_NODE_CANARY_ROLES)
+    assert settings.node_canary_receipt_path is None
+    assert settings.node_canary_max_age_seconds == 86_400
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('["text","code"]', ["text", "code"]),
+        ("vision, embedding", ["vision", "embedding"]),
+    ],
+)
+def test_node_canary_roles_accept_json_or_csv(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: list[str]
+) -> None:
+    monkeypatch.setenv("LOCALLLM_NODE_CANARY_ROLES", raw)
+
+    assert Settings(_env_file=None).node_canary_roles == expected
+
+
+@pytest.mark.parametrize("roles", [[], ["audio"], ["text", "text"]])
+def test_node_canary_roles_reject_empty_unknown_or_duplicate_values(
+    roles: list[str],
+) -> None:
+    with pytest.raises(ValueError, match="canary role"):
+        Settings(node_canary_roles=roles, _env_file=None)
+
+
+@pytest.mark.parametrize("release_id", ["", "contains spaces", "../../release", "x" * 129])
+def test_release_id_uses_a_bounded_nonsecret_identifier_shape(release_id: str) -> None:
+    with pytest.raises(ValueError, match="release ID"):
+        Settings(release_id=release_id, _env_file=None)
+
+
+def test_canary_receipt_path_requires_immutable_release_bound_location(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    release_id = "01234567-89abcdef"
+    canary_dir = data_dir / "node-canaries"
+    canary_dir.mkdir(mode=0o700)
+    inside = data_dir / "node-canaries" / f"{release_id}.json"
+
+    settings = Settings(
+        data_dir=data_dir,
+        release_id=release_id,
+        node_canary_receipt_path=inside,
+        _env_file=None,
+    )
+    assert settings.node_canary_receipt_path == inside
+
+    with pytest.raises(ValueError, match="receipt"):
+        Settings(
+            data_dir=data_dir,
+            release_id=release_id,
+            node_canary_receipt_path=tmp_path / "outside.json",
+            _env_file=None,
+        )
+
+    canary_dir.chmod(0o755)
+    with pytest.raises(ValueError, match="owner-private"):
+        Settings(
+            data_dir=data_dir,
+            release_id=release_id,
+            node_canary_receipt_path=inside,
+            _env_file=None,
+        )
+
+    with pytest.raises(ValueError, match="release-bound"):
+        Settings(
+            data_dir=data_dir,
+            release_id=release_id,
+            node_canary_receipt_path=data_dir / "conversations.sqlite3",
+            _env_file=None,
+        )
+
+
+@pytest.mark.parametrize("release_id", ["dev", "unknown", "release-test"])
+def test_configured_canary_rejects_reusable_release_identity(
+    tmp_path, release_id: str
+) -> None:
+    data_dir = tmp_path / "data"
+    with pytest.raises(ValueError, match="immutable"):
+        Settings(
+            data_dir=data_dir,
+            release_id=release_id,
+            node_canary_receipt_path=data_dir / "node-canaries" / f"{release_id}.json",
+            _env_file=None,
+        )
 
 
 @pytest.mark.parametrize(
