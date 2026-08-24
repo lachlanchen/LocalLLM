@@ -92,13 +92,24 @@ localllm-embed       → bge-m3:latest
   checks. For a local-only vision request, use a bounded local image encoded as a
   data URL and do not supply a remote image URL. Upstream support or rejection of
   other image URL shapes is Ollama behavior.
-- Context size is configured at model/runtime level; it is not inferred from an OpenAI request. The installed user service defaults direct `/v1` requests to a bounded 65,536-token Ollama context through `LOCALLLM_OLLAMA_CONTEXT_LENGTH`, which can be changed and rendered by rerunning `scripts/install-user-services.sh`.
+- Context size is configured at model/runtime level; it is not inferred from an
+  OpenAI request. The installed user service defaults direct `/v1` requests to
+  a bounded 65,536-token Ollama context through
+  `LOCALLLM_OLLAMA_CONTEXT_LENGTH`, which can be changed and rendered by
+  rerunning `scripts/install-user-services.sh`. Ollama's native `options`
+  object is not a supported field on this OpenAI lane and cannot override that
+  context per request.
 - Thinking-capable Qwen3 tags can spend much of a small completion-token budget
   on hidden reasoning before emitting visible text. A very low `max_tokens` can
   therefore produce an empty visible message even though inference occurred;
-  omit the limit or leave enough headroom. Ollama's native `/api/chat` supports
-  `"think": false` for controlled no-thinking benchmarks, but that field is not
-  part of the OpenAI contract.
+  omit the limit or leave enough headroom. The bounded node canary supplies the
+  supported OpenAI `"reasoning_effort": "none"` control. Ollama's native
+  `think` and `options` fields are not supported OpenAI fields here and must not
+  be relied on.
+- Ollama's native `keep_alive` field is not part of this OpenAI lane. The node
+  canary performs its bounded cleanup separately against the literal-loopback
+  native Ollama origin, using the exact model tag resolved during preflight and
+  no API authorization header.
 
 ## Verify with the official Python SDK
 

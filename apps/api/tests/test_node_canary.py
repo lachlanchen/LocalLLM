@@ -15,6 +15,7 @@ from localllm.node_canary import (
     read_private_api_key,
     validate_canary_receipt,
     validate_loopback_base_url,
+    validate_loopback_ollama_base_url,
 )
 
 TIMESTAMP = "2026-08-25T00:00:00Z"
@@ -91,6 +92,32 @@ def test_verifier_rejects_nonliteral_or_ambiguous_base_urls(url: str) -> None:
 def test_verifier_accepts_literal_ipv4_and_ipv6_loopback_urls() -> None:
     assert validate_loopback_base_url("http://127.0.0.1:8008/v1/") == ("http://127.0.0.1:8008/v1")
     assert validate_loopback_base_url("http://[::1]:8008/v1") == "http://[::1]:8008/v1"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://127.0.0.1:11434",
+        "http://localhost:11434",
+        "http://192.0.2.1:11434",
+        "http://user:secret@127.0.0.1:11434",
+        "http://127.0.0.1:11434/api",
+        "http://127.0.0.1:11434//",
+        "http://127.0.0.1:11434?key=secret",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1",
+    ],
+)
+def test_verifier_rejects_nonliteral_or_ambiguous_ollama_origins(url: str) -> None:
+    with pytest.raises(CanaryContractError):
+        validate_loopback_ollama_base_url(url)
+
+
+def test_verifier_accepts_literal_ipv4_and_ipv6_ollama_origins() -> None:
+    assert validate_loopback_ollama_base_url("http://127.0.0.1:11434/") == (
+        "http://127.0.0.1:11434"
+    )
+    assert validate_loopback_ollama_base_url("http://[::1]:21434") == "http://[::1]:21434"
 
 
 def test_private_api_key_file_rejects_symlink_or_open_permissions(tmp_path: Path) -> None:

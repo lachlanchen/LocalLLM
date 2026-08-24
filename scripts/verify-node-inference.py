@@ -15,6 +15,7 @@ if str(API_ROOT) not in sys.path:
 
 from localllm.node_canary import (
     CANARY_ROLES,
+    DEFAULT_OLLAMA_BASE_URL,
     MAX_ROLE_TIMEOUT_SECONDS,
     MIN_ROLE_TIMEOUT_SECONDS,
     CanaryContractError,
@@ -25,6 +26,7 @@ from localllm.node_canary import (
     failed_receipt,
     read_private_api_key,
     validate_canary_output_path,
+    validate_loopback_ollama_base_url,
     validate_roles,
     verify_node_inference,
 )
@@ -48,6 +50,11 @@ def _parser(environment: Mapping[str, str]) -> argparse.ArgumentParser:
             "LOCALLLM_NODE_CANARY_BASE_URL", "http://127.0.0.1:8008/v1"
         ),
         help="literal loopback HTTP /v1 endpoint",
+    )
+    parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="literal loopback HTTP Ollama origin used only for exact-tag cleanup",
     )
     parser.add_argument(
         "--roles",
@@ -151,6 +158,9 @@ def main(
         timeouts = _role_timeouts(
             roles, arguments.timeout_seconds, arguments.role_timeout
         )
+        ollama_base_url = validate_loopback_ollama_base_url(
+            arguments.ollama_base_url
+        )
         data_dir = _absolute_project_path(arguments.data_dir)
         output = (
             _absolute_project_path(arguments.output)
@@ -168,7 +178,13 @@ def main(
                 current_environment, arguments.api_key_env
             )
         receipt = asyncio.run(
-            verify_node_inference(arguments.base_url, api_key, roles, timeouts)
+            verify_node_inference(
+                arguments.base_url,
+                api_key,
+                roles,
+                timeouts,
+                ollama_base_url=ollama_base_url,
+            )
         )
         exit_code = 0 if receipt["status"] == "passed" else 1
     except KeyboardInterrupt:

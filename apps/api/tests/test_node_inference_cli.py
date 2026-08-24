@@ -50,12 +50,12 @@ def test_cli_persists_only_with_explicit_output_and_never_serializes_key(
     data_dir = tmp_path / "data"
     data_dir.mkdir(mode=0o700)
     private_key = "private-cli-key-must-not-escape"
-    calls: list[tuple[str, str, tuple[str, ...], dict[str, float]]] = []
+    calls: list[tuple[str, str, tuple[str, ...], dict[str, float], str]] = []
     stdout_receipts: list[object] = []
     passed_receipt = _passed_text_receipt()
 
-    async def fake_verify(base_url, api_key, roles, timeouts):
-        calls.append((base_url, api_key, roles, timeouts))
+    async def fake_verify(base_url, api_key, roles, timeouts, *, ollama_base_url):
+        calls.append((base_url, api_key, roles, timeouts, ollama_base_url))
         return passed_receipt
 
     monkeypatch.setattr(script, "verify_node_inference", fake_verify)
@@ -87,12 +87,14 @@ def test_cli_persists_only_with_explicit_output_and_never_serializes_key(
             private_key,
             ("text",),
             {"text": 7.0},
+            "http://127.0.0.1:11434",
         ),
         (
             "http://127.0.0.1:18008/v1",
             private_key,
             ("text",),
             {"text": 7.0},
+            "http://127.0.0.1:11434",
         ),
     ]
     serialized = json.dumps(stdout_receipts)
@@ -133,7 +135,7 @@ def test_cli_rejects_database_output_before_starting_inference(
     database.chmod(0o600)
     inference_started = False
 
-    async def fake_verify(base_url, api_key, roles, timeouts):
+    async def fake_verify(base_url, api_key, roles, timeouts, *, ollama_base_url):
         nonlocal inference_started
         inference_started = True
         return _passed_text_receipt()
@@ -168,7 +170,7 @@ def test_cli_refuses_receipt_when_observed_release_does_not_match_filename(
     canary_dir.mkdir(mode=0o700)
     destination = canary_dir / "different-release.json"
 
-    async def fake_verify(base_url, api_key, roles, timeouts):
+    async def fake_verify(base_url, api_key, roles, timeouts, *, ollama_base_url):
         return _passed_text_receipt()
 
     monkeypatch.setattr(script, "verify_node_inference", fake_verify)
@@ -188,3 +190,31 @@ def test_cli_refuses_receipt_when_observed_release_does_not_match_filename(
 
     assert exit_code == 2
     assert not destination.exists()
+
+
+def test_cli_rejects_nonloopback_ollama_origin_before_starting_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _load_script()
+    inference_started = False
+
+    async def fake_verify(base_url, api_key, roles, timeouts, *, ollama_base_url):
+        nonlocal inference_started
+        inference_started = True
+        return _passed_text_receipt()
+
+    monkeypatch.setattr(script, "verify_node_inference", fake_verify)
+    monkeypatch.setattr(script, "_write_stdout", lambda receipt: None)
+
+    exit_code = script.main(
+        [
+            "--roles",
+            "text",
+            "--ollama-base-url",
+            "http://ollama.internal:11434",
+        ],
+        {"LOCALLLM_API_KEY": "private-key"},
+    )
+
+    assert exit_code == 2
+    assert inference_started is False

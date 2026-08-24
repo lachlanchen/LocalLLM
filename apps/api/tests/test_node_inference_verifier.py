@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
+import localllm.node_canary as node_canary
 from localllm.node_canary import CANARY_ROLES, ROLE_ALIASES, verify_node_inference
 
 RELEASE_ID = "release-abcdef12"
@@ -24,7 +25,7 @@ DIGESTS = {
 }
 ANSWERS = {
     "text": "42",
-    "code": "30",
+    "code": "cba",
     "vision": "RED,GREEN,BLUE",
 }
 
@@ -54,9 +55,37 @@ def role_for_alias(alias: str) -> str:
     return next(role for role, candidate in ROLE_ALIASES.items() if candidate == alias)
 
 
+def successful_ollama_transport(
+    requests: list[httpx.Request] | None = None,
+) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/generate"
+        assert request.url.host == "127.0.0.1"
+        assert request.url.port == 11434
+        assert "authorization" not in request.headers
+        payload = json.loads(request.content)
+        assert set(payload) == {"model", "keep_alive", "stream"}
+        assert payload["keep_alive"] == 0
+        assert payload["stream"] is False
+        if requests is not None:
+            requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": payload["model"],
+                "done": True,
+                "done_reason": "unload",
+            },
+        )
+
+    return httpx.MockTransport(handler)
+
+
 @pytest.mark.asyncio
 async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_receipt() -> None:
     requests: list[dict[str, Any]] = []
+    unload_requests: list[httpx.Request] = []
     capability_requests = 0
     private_key = "private-canary-key-never-return"
 
@@ -71,8 +100,9 @@ async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_r
         payload = json.loads(request.content)
         requests.append(payload)
         role = role_for_alias(payload["model"])
-        assert payload["keep_alive"] == 0
-        assert payload["options"]["num_ctx"] == 2048
+        assert "keep_alive" not in payload
+        assert "think" not in payload
+        assert "options" not in payload
         if role == "embedding":
             assert request.url.path == "/v1/embeddings"
             assert payload["input"] == ["a red circle", "a blue ocean wave"]
@@ -88,11 +118,15 @@ async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_r
                 },
             )
         assert request.url.path == "/v1/chat/completions"
-        assert payload["think"] is False
+        assert payload["reasoning_effort"] == "none"
         assert payload["max_tokens"] == 32
-        assert payload["options"]["num_predict"] == 32
         normalized_prompt = json.dumps(payload["messages"]).replace(" ", "").upper()
-        assert ANSWERS[role] not in normalized_prompt
+        assert ANSWERS[role].upper() not in normalized_prompt
+        if role == "code":
+            prompt = payload["messages"][0]["content"]
+            assert '"".join(reversed("abc"))' in prompt
+            assert "three lowercase letters" in prompt
+            assert "no quotes" in prompt
         if role == "vision":
             image = payload["messages"][0]["content"][1]["image_url"]["url"]
             assert image.startswith("data:image/png;base64,")
@@ -111,6 +145,7 @@ async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_r
         CANARY_ROLES,
         {role: 5 for role in CANARY_ROLES},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert receipt["status"] == "passed"
@@ -120,6 +155,9 @@ async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_r
         RESOLVED[role] for role in CANARY_ROLES
     ]
     assert len(requests) == 4
+    assert [json.loads(request.content)["model"] for request in unload_requests] == [
+        RESOLVED[role] for role in CANARY_ROLES
+    ]
     assert capability_requests == 8
     serialized = json.dumps(receipt)
     for forbidden in (
@@ -135,6 +173,7 @@ async def test_all_roles_execute_with_bounded_unload_controls_and_content_free_r
 @pytest.mark.asyncio
 async def test_http_failure_is_content_free_and_does_not_claim_provenance() -> None:
     secret = "SECRET_UPSTREAM_RESPONSE_MUST_NOT_ESCAPE"
+    unload_requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -149,6 +188,7 @@ async def test_http_failure_is_content_free_and_does_not_claim_provenance() -> N
         ("text",),
         {"text": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert receipt["status"] == "failed"
@@ -156,6 +196,8 @@ async def test_http_failure_is_content_free_and_does_not_claim_provenance() -> N
     assert receipt["roles"][0]["status"] == "failed"
     assert receipt["roles"][0]["resolved_model"] is None
     assert receipt["roles"][0]["digest"] is None
+    assert len(unload_requests) == 1
+    assert json.loads(unload_requests[0].content)["model"] == RESOLVED["text"]
     assert secret not in json.dumps(receipt)
 
 
@@ -180,6 +222,7 @@ async def test_vision_canary_requires_the_exact_undisclosed_band_sequence() -> N
         ("vision",),
         {"vision": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(),
     )
 
     assert receipt["status"] == "failed"
@@ -188,12 +231,19 @@ async def test_vision_canary_requires_the_exact_undisclosed_band_sequence() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("role", "verbose_answer"),
-    [("text", "The answer is 42"), ("code", "30 is the result")],
+    ("role", "invalid_answer"),
+    [
+        ("text", "The answer is 42"),
+        ("code", "cba is the result"),
+        ("code", '"cba"'),
+        ("code", "`cba`"),
+    ],
 )
 async def test_text_and_code_canaries_require_exact_semantic_answers(
-    role: str, verbose_answer: str
+    role: str, invalid_answer: str
 ) -> None:
+    unload_requests: list[httpx.Request] = []
+
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json=model_list())
@@ -203,7 +253,7 @@ async def test_text_and_code_canaries_require_exact_semantic_answers(
             200,
             json={
                 "model": RESOLVED[role],
-                "choices": [{"message": {"content": verbose_answer}}],
+                "choices": [{"message": {"content": invalid_answer}}],
             },
         )
 
@@ -213,9 +263,12 @@ async def test_text_and_code_canaries_require_exact_semantic_answers(
         (role,),
         {role: 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert receipt["status"] == "failed"
+    assert len(unload_requests) == 1
+    assert json.loads(unload_requests[0].content)["model"] == RESOLVED[role]
 
 
 @pytest.mark.asyncio
@@ -245,6 +298,7 @@ async def test_embedding_canary_requires_1024_finite_nonzero_values(
         ("embedding",),
         {"embedding": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(),
     )
 
     assert receipt["status"] == "failed"
@@ -275,6 +329,7 @@ async def test_embedding_canary_rejects_constant_nonzero_stub() -> None:
         ("embedding",),
         {"embedding": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(),
     )
 
     assert receipt["status"] == "failed"
@@ -305,6 +360,7 @@ async def test_chat_response_model_must_equal_preflight_resolution(
         ("text",),
         {"text": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(),
     )
 
     assert capability_requests == 2
@@ -337,6 +393,7 @@ async def test_embedding_response_model_must_equal_preflight_resolution(
         ("embedding",),
         {"embedding": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(),
     )
 
     assert receipt["status"] == "failed"
@@ -345,6 +402,7 @@ async def test_embedding_response_model_must_equal_preflight_resolution(
 @pytest.mark.asyncio
 async def test_per_role_timeout_cancels_the_request_and_reports_only_timeout_status() -> None:
     request_cancelled = asyncio.Event()
+    unload_requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -363,12 +421,15 @@ async def test_per_role_timeout_cancels_the_request_and_reports_only_timeout_sta
         ("text",),
         {"text": 1},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert request_cancelled.is_set()
     assert receipt["status"] == "failed"
     assert receipt["release_id"] == RELEASE_ID
     assert receipt["roles"][0]["status"] == "timed_out"
+    assert len(unload_requests) == 1
+    assert json.loads(unload_requests[0].content)["model"] == RESOLVED["text"]
     assert 900 <= receipt["roles"][0]["latency_ms"] <= 1500
 
 
@@ -376,6 +437,7 @@ async def test_per_role_timeout_cancels_the_request_and_reports_only_timeout_sta
 async def test_external_cancellation_propagates_and_closes_the_inflight_request() -> None:
     started = asyncio.Event()
     request_cancelled = asyncio.Event()
+    unload_requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -396,6 +458,7 @@ async def test_external_cancellation_propagates_and_closes_the_inflight_request(
             ("text",),
             {"text": 30},
             transport=httpx.MockTransport(handler),
+            ollama_transport=successful_ollama_transport(unload_requests),
         )
     )
     await asyncio.wait_for(started.wait(), timeout=1)
@@ -404,11 +467,239 @@ async def test_external_cancellation_propagates_and_closes_the_inflight_request(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert request_cancelled.is_set()
+    assert len(unload_requests) == 1
+    assert json.loads(unload_requests[0].content)["model"] == RESOLVED["text"]
+
+
+@pytest.mark.asyncio
+async def test_unload_http_failure_fails_closed_once_without_exposing_content() -> None:
+    unload_requests: list[httpx.Request] = []
+    secret = "SECRET_OLLAMA_UNLOAD_RESPONSE_MUST_NOT_ESCAPE"
+
+    async def api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=model_list())
+        if request.url.path == "/api/node/capabilities":
+            return httpx.Response(200, json=capabilities())
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED["text"],
+                "choices": [{"message": {"content": ANSWERS["text"]}}],
+            },
+        )
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        unload_requests.append(request)
+        assert "authorization" not in request.headers
+        assert json.loads(request.content) == {
+            "model": RESOLVED["text"],
+            "keep_alive": 0,
+            "stream": False,
+        }
+        return httpx.Response(500, text=secret)
+
+    receipt = await verify_node_inference(
+        "http://127.0.0.1:18008/v1",
+        "private-key",
+        ("text",),
+        {"text": 5},
+        transport=httpx.MockTransport(api_handler),
+        ollama_transport=httpx.MockTransport(ollama_handler),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["roles"][0]["status"] == "failed"
+    assert receipt["roles"][0]["resolved_model"] is None
+    assert len(unload_requests) == 1
+    assert secret not in json.dumps(receipt)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_fails_later_roles_without_dispatching_them() -> None:
+    inference_roles: list[str] = []
+    unload_models: list[str] = []
+    secret = "SECRET_FIRST_CLEANUP_FAILURE"
+
+    async def api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=model_list())
+        if request.url.path == "/api/node/capabilities":
+            return httpx.Response(200, json=capabilities())
+        payload = json.loads(request.content)
+        role = role_for_alias(payload["model"])
+        inference_roles.append(role)
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED[role],
+                "choices": [{"message": {"content": ANSWERS[role]}}],
+            },
+        )
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        unload_models.append(json.loads(request.content)["model"])
+        return httpx.Response(500, text=secret)
+
+    receipt = await verify_node_inference(
+        "http://127.0.0.1:18008/v1",
+        "private-key",
+        ("text", "code"),
+        {"text": 5, "code": 5},
+        transport=httpx.MockTransport(api_handler),
+        ollama_transport=httpx.MockTransport(ollama_handler),
+    )
+
+    assert receipt["status"] == "failed"
+    assert [item["status"] for item in receipt["roles"]] == ["failed", "failed"]
+    assert receipt["roles"][1]["latency_ms"] == 0
+    assert inference_roles == ["text"]
+    assert unload_models == [RESOLVED["text"]]
+    assert secret not in json.dumps(receipt)
+
+
+@pytest.mark.asyncio
+async def test_stalled_cleanup_has_a_bounded_grace_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_cancelled = asyncio.Event()
+    unload_requests: list[httpx.Request] = []
+    monkeypatch.setattr(node_canary, "OLLAMA_UNLOAD_TIMEOUT_SECONDS", 0.02)
+
+    async def api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=model_list())
+        if request.url.path == "/api/node/capabilities":
+            return httpx.Response(200, json=capabilities())
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED["text"],
+                "choices": [{"message": {"content": ANSWERS["text"]}}],
+            },
+        )
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        unload_requests.append(request)
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+
+    started = asyncio.get_running_loop().time()
+    receipt = await verify_node_inference(
+        "http://127.0.0.1:18008/v1",
+        "private-key",
+        ("text",),
+        {"text": 5},
+        transport=httpx.MockTransport(api_handler),
+        ollama_transport=httpx.MockTransport(ollama_handler),
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert receipt["status"] == "failed"
+    assert receipt["roles"][0]["status"] == "failed"
+    assert cleanup_cancelled.is_set()
+    assert len(unload_requests) == 1
+    assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_child_cleanup_cancellation_is_a_cleanup_failure_not_parent_cancellation() -> None:
+    unload_requests: list[httpx.Request] = []
+
+    async def api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=model_list())
+        if request.url.path == "/api/node/capabilities":
+            return httpx.Response(200, json=capabilities())
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED["text"],
+                "choices": [{"message": {"content": ANSWERS["text"]}}],
+            },
+        )
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        unload_requests.append(request)
+        raise asyncio.CancelledError()
+
+    receipt = await verify_node_inference(
+        "http://127.0.0.1:18008/v1",
+        "private-key",
+        ("text",),
+        {"text": 5},
+        transport=httpx.MockTransport(api_handler),
+        ollama_transport=httpx.MockTransport(ollama_handler),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["roles"][0]["status"] == "failed"
+    assert len(unload_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_during_unload_is_shielded_and_one_shot() -> None:
+    cleanup_started = asyncio.Event()
+    permit_cleanup = asyncio.Event()
+    cleanup_completed = asyncio.Event()
+    unload_requests: list[httpx.Request] = []
+
+    async def api_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=model_list())
+        if request.url.path == "/api/node/capabilities":
+            return httpx.Response(200, json=capabilities())
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED["text"],
+                "choices": [{"message": {"content": ANSWERS["text"]}}],
+            },
+        )
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        unload_requests.append(request)
+        cleanup_started.set()
+        await permit_cleanup.wait()
+        cleanup_completed.set()
+        return httpx.Response(
+            200,
+            json={
+                "model": RESOLVED["text"],
+                "done": True,
+                "done_reason": "unload",
+            },
+        )
+
+    task = asyncio.create_task(
+        verify_node_inference(
+            "http://127.0.0.1:18008/v1",
+            "private-key",
+            ("text",),
+            {"text": 5},
+            transport=httpx.MockTransport(api_handler),
+            ollama_transport=httpx.MockTransport(ollama_handler),
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    permit_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_completed.is_set()
+    assert len(unload_requests) == 1
 
 
 @pytest.mark.asyncio
 async def test_alias_release_or_digest_mismatch_fails_closed() -> None:
     scenarios = ("missing-alias", "old-schema", "missing-digest")
+    unload_requests: list[httpx.Request] = []
     for scenario in scenarios:
 
         async def handler(request: httpx.Request, current: str = scenario) -> httpx.Response:
@@ -434,14 +725,17 @@ async def test_alias_release_or_digest_mismatch_fails_closed() -> None:
             ("text",),
             {"text": 5},
             transport=httpx.MockTransport(handler),
+            ollama_transport=successful_ollama_transport(unload_requests),
         )
         assert receipt["status"] == "failed"
         assert receipt["roles"][0]["status"] == "failed"
+    assert unload_requests == []
 
 
 @pytest.mark.asyncio
 async def test_release_change_during_multi_role_canary_invalidates_all_results() -> None:
     capability_calls = 0
+    unload_requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal capability_calls
@@ -469,11 +763,15 @@ async def test_release_change_during_multi_role_canary_invalidates_all_results()
         ("text", "code"),
         {"text": 5, "code": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert receipt["status"] == "failed"
     assert receipt["release_id"] == "unknown"
     assert all(item["status"] == "failed" for item in receipt["roles"])
+    assert [json.loads(request.content)["model"] for request in unload_requests] == [
+        RESOLVED["text"],
+    ]
 
 
 @pytest.mark.asyncio
@@ -482,6 +780,7 @@ async def test_postflight_provenance_change_fails_the_completed_role(
     changed_field: str,
 ) -> None:
     capability_calls = 0
+    unload_requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal capability_calls
@@ -512,9 +811,12 @@ async def test_postflight_provenance_change_fails_the_completed_role(
         ("text",),
         {"text": 5},
         transport=httpx.MockTransport(handler),
+        ollama_transport=successful_ollama_transport(unload_requests),
     )
 
     assert capability_calls == 2
     assert receipt["status"] == "failed"
     assert receipt["roles"][0]["status"] == "failed"
     assert receipt["roles"][0]["resolved_model"] is None
+    assert len(unload_requests) == 1
+    assert json.loads(unload_requests[0].content)["model"] == RESOLVED["text"]

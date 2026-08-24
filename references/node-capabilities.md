@@ -73,15 +73,33 @@ passing receipt before enrolling or switching a node.
 The verifier validates every selected stable alias through `/v1/models`, checks
 its resolved tag and digest against node capabilities, then runs actual Chat
 Completions for text/code/vision and Embeddings for embedding. It uses a fixed
-in-memory PNG, sequential requests, a 2,048-token context, a 32-token output
-bound, bounded response bytes, per-role deadlines, `think: false`, and
-`keep_alive: 0` to request immediate unload. Text, code, and vision must return
-exact normalized answers that are not disclosed in their prompts; BGE-M3 must
-return two 1,024-value finite, nonzero vectors for two distinct inputs, with at
-least one component differing between them. Chat and embedding responses must
-identify the exact resolved model observed during preflight. Its JSON contains
-only status, role, latency, alias, resolved model, digest, release identity, and
-UTC timestamps.
+in-memory PNG and sequential requests. The OpenAI lane uses the
+service-configured context together with a 32-token chat-output bound, bounded
+response bytes, per-role deadlines, and OpenAI-compatible
+`reasoning_effort: "none"`; it does not send Ollama-native lifetime or options
+fields through `/v1`. Text, code, and vision must return exact normalized
+answers that are not disclosed in their prompts. The code probe evaluates
+`"".join(reversed("abc"))`, requests three unquoted lowercase letters, and
+accepts only the normalized answer `CBA`; explanations, quotes, and code fences
+fail closed. BGE-M3 must return two 1,024-value finite, nonzero vectors for two
+distinct inputs, with at least one component differing between them. Chat and
+embedding responses must identify the exact resolved model observed during
+preflight. Its JSON contains only status, role, latency, alias, resolved model,
+digest, release identity, and UTC timestamps.
+
+After a role resolves its exact model and dispatches inference, the verifier
+always makes one bounded native `POST /api/generate` to the fixed loopback
+Ollama origin (default `http://127.0.0.1:11434`) with that exact tag and
+`keep_alive: 0`. This cleanup runs in `finally`, including semantic, upstream,
+postflight, timeout, and cancellation paths. It uses a separate client with no
+API authorization header, ignores proxy environment variables, refuses
+redirects and non-literal-loopback origins, and never enumerates or unloads
+arbitrary `/api/ps` entries. A failed cleanup fails the role without adding
+response content or errors to the receipt, stops further inference, and records
+all remaining selected roles as failed. The configured per-role deadline covers
+the probe. Shielded cleanup has its own 10-second bound, so cancellation at the
+role deadline may add up to 10 seconds of cleanup grace before the verifier
+returns.
 
 Every receipt is bound to the `LOCALLLM_RELEASE_ID` returned by the running API.
 A fresh receipt from an older release reports `release_mismatch` and cannot make
@@ -127,6 +145,7 @@ resolved manifest digest observed before inference and rechecks that provenance
 immediately afterward. Freshness is measured from the oldest configured role's
 timestamp, not merely from the aggregate receipt time.
 
-`keep_alive: 0` is an unload request, not proof that cancellation or an upstream
-failure left no model resident. A production activation should additionally
-require Ollama `/api/ps` to become empty before promotion.
+The exact-tag cleanup is not proof that unrelated or earlier jobs left no model
+resident. A production activation should additionally require Ollama `/api/ps`
+to become empty before promotion, without asking the verifier to unload entries
+it did not start.

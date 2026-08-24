@@ -22,6 +22,7 @@ import httpx
 
 CANARY_SCHEMA_VERSION = 1
 CANARY_ROLES = ("text", "code", "vision", "embedding")
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 ROLE_ALIASES: dict[str, str] = {
     "text": "localllm-fast",
     "code": "localllm-code",
@@ -31,6 +32,8 @@ ROLE_ALIASES: dict[str, str] = {
 CANARY_STATUSES = frozenset({"passed", "failed", "timed_out", "cancelled"})
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_OLLAMA_UNLOAD_RESPONSE_BYTES = 64 * 1024
+OLLAMA_UNLOAD_TIMEOUT_SECONDS = 10.0
 MIN_ROLE_TIMEOUT_SECONDS = 1.0
 MAX_ROLE_TIMEOUT_SECONDS = 600.0
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
@@ -50,6 +53,10 @@ class CanaryContractError(ValueError):
 
 class CanaryProbeError(RuntimeError):
     """A content-free canary failure sentinel."""
+
+
+class _CanaryCleanupError(CanaryProbeError):
+    """An internal content-free sentinel requiring the remaining roles to fail closed."""
 
 
 def utc_timestamp(now: datetime | None = None) -> str:
@@ -98,6 +105,36 @@ def validate_loopback_base_url(value: str) -> str:
         f"[{address.compressed}]:{port}" if address.version == 6 else f"{address.compressed}:{port}"
     )
     return urlunsplit(("http", netloc, "/v1", "", ""))
+
+
+def validate_loopback_ollama_base_url(value: str) -> str:
+    if len(value) > 512:
+        raise CanaryContractError("Ollama base URL is too long")
+    parsed = urlsplit(value.strip())
+    try:
+        port = parsed.port
+        host = parsed.hostname
+        address = ipaddress.ip_address(host or "")
+    except ValueError as exc:
+        raise CanaryContractError(
+            "Ollama base URL must use a literal loopback address"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or not address.is_loopback
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is None
+        or port < 1
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise CanaryContractError("Ollama base URL must be an HTTP loopback origin")
+    netloc = (
+        f"[{address.compressed}]:{port}" if address.version == 6 else f"{address.compressed}:{port}"
+    )
+    return urlunsplit(("http", netloc, "", "", ""))
 
 
 def validate_roles(roles: Sequence[str]) -> tuple[str, ...]:
@@ -196,8 +233,8 @@ def _canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _bounded_json_bytes(body: bytes) -> Any:
-    if len(body) > MAX_HTTP_RESPONSE_BYTES:
+def _bounded_json_bytes(body: bytes, max_response_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> Any:
+    if len(body) > max_response_bytes:
         raise CanaryProbeError("response_too_large")
     try:
         return json.loads(body)
@@ -206,7 +243,12 @@ def _bounded_json_bytes(body: bytes) -> Any:
 
 
 async def _request_json(
-    client: httpx.AsyncClient, method: str, url: str, payload: dict[str, Any] | None = None
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    max_response_bytes: int = MAX_HTTP_RESPONSE_BYTES,
 ) -> Any:
     body = bytearray()
     request_options: dict[str, Any] = {}
@@ -216,10 +258,10 @@ async def _request_json(
         if response.status_code < 200 or response.status_code >= 300:
             raise CanaryProbeError("request_failed")
         async for chunk in response.aiter_bytes():
-            if len(body) + len(chunk) > MAX_HTTP_RESPONSE_BYTES:
+            if len(body) + len(chunk) > max_response_bytes:
                 raise CanaryProbeError("response_too_large")
             body.extend(chunk)
-    return _bounded_json_bytes(bytes(body))
+    return _bounded_json_bytes(bytes(body), max_response_bytes)
 
 
 def _inventory_for_alias(
@@ -295,7 +337,7 @@ def _validate_chat_result(role: str, payload: object, resolved_model: str) -> No
     content = _chat_content(payload)
     expected = {
         "text": "42",
-        "code": "30",
+        "code": "CBA",
         "vision": "RED,GREEN,BLUE",
     }[role]
     if _normalized_answer(content) != expected:
@@ -347,8 +389,9 @@ def _chat_payload(role: str, alias: str) -> dict[str, Any]:
         ]
     elif role == "code":
         content = (
-            "Using Python semantics, evaluate sum(i * i for i in range(1, 5)). "
-            "Output only the decimal integer result."
+            'Using Python semantics, evaluate "".join(reversed("abc")). '
+            "Output only the resulting three lowercase letters, with no quotes, "
+            "code fences, or other formatting."
         )
     else:
         content = "Add seventeen and twenty-five. Output only the decimal integer result."
@@ -356,19 +399,77 @@ def _chat_payload(role: str, alias: str) -> dict[str, Any]:
         "model": alias,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
-        "think": False,
+        "reasoning_effort": "none",
         "stream": False,
         "max_tokens": 32,
-        "keep_alive": 0,
-        "options": {"num_ctx": 2048, "num_predict": 32},
     }
+
+
+async def _unload_resolved_model(
+    client: httpx.AsyncClient, ollama_base_url: str, resolved_model: str
+) -> None:
+    payload = await _request_json(
+        client,
+        "POST",
+        f"{ollama_base_url}/api/generate",
+        {"model": resolved_model, "keep_alive": 0, "stream": False},
+        max_response_bytes=MAX_OLLAMA_UNLOAD_RESPONSE_BYTES,
+    )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("model") != resolved_model
+        or payload.get("done") is not True
+        or payload.get("done_reason") != "unload"
+    ):
+        raise CanaryProbeError("unload_failed")
+
+
+async def _shielded_unload(
+    client: httpx.AsyncClient, ollama_base_url: str, resolved_model: str
+) -> None:
+    parent_task = asyncio.current_task()
+    cleanup_task = asyncio.create_task(
+        asyncio.wait_for(
+            _unload_resolved_model(client, ollama_base_url, resolved_model),
+            timeout=OLLAMA_UNLOAD_TIMEOUT_SECONDS,
+        )
+    )
+    cancellation_seen = False
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            cancelling = getattr(parent_task, "cancelling", None)
+            if callable(cancelling) and cancelling():
+                cancellation_seen = True
+            elif cleanup_task.done() and cleanup_task.cancelled():
+                break
+            else:
+                cancellation_seen = True
+        except Exception:
+            break
+
+    cleanup_error: Exception | asyncio.CancelledError | None = None
+    try:
+        cleanup_task.result()
+    except asyncio.CancelledError as exc:
+        cleanup_error = exc
+    except Exception as exc:
+        cleanup_error = exc
+    if cancellation_seen:
+        raise asyncio.CancelledError()
+    if cleanup_error is not None:
+        raise _CanaryCleanupError("unload_failed") from cleanup_error
 
 
 async def _probe_role(
     client: httpx.AsyncClient,
+    ollama_client: httpx.AsyncClient,
     base_url: str,
+    ollama_base_url: str,
     role: str,
     observed_release_ids: set[str],
+    cleanup_failure: asyncio.Event,
 ) -> tuple[str, str, str]:
     alias = ROLE_ALIASES[role]
     origin = base_url.removesuffix("/v1")
@@ -379,46 +480,60 @@ async def _probe_role(
     if len(observed_release_ids) > 1:
         raise CanaryProbeError("release_changed")
     inference_error: BaseException | None = None
-    if role == "embedding":
-        try:
-            result = await _request_json(
-                client,
-                "POST",
-                f"{base_url}/embeddings",
-                {
-                    "model": alias,
-                    "input": ["a red circle", "a blue ocean wave"],
-                    "keep_alive": 0,
-                    "options": {"num_ctx": 2048},
-                },
-            )
-        except (CanaryProbeError, httpx.HTTPError, TypeError, ValueError) as exc:
-            result = None
-            inference_error = exc
-    else:
-        try:
-            result = await _request_json(
-                client, "POST", f"{base_url}/chat/completions", _chat_payload(role, alias)
-            )
-        except (CanaryProbeError, httpx.HTTPError, TypeError, ValueError) as exc:
-            result = None
-            inference_error = exc
-    post_capabilities = await _request_json(client, "GET", f"{origin}/api/node/capabilities")
-    post_resolved, post_digest, post_release_id = _inventory_for_alias(
-        alias, models_payload, post_capabilities
-    )
-    observed_release_ids.add(post_release_id)
-    if len(observed_release_ids) > 1:
-        raise CanaryProbeError("release_changed")
-    if (post_resolved, post_digest, post_release_id) != (resolved, digest, release_id):
-        raise CanaryProbeError("provenance_changed")
-    if inference_error is not None:
-        raise CanaryProbeError("inference_failed") from inference_error
-    if role == "embedding":
-        _validate_embedding_result(result, resolved)
-    else:
-        _validate_chat_result(role, result, resolved)
-    return resolved, digest, release_id
+    inference_dispatched = False
+    primary_cancelled = False
+    try:
+        if role == "embedding":
+            try:
+                inference_dispatched = True
+                result = await _request_json(
+                    client,
+                    "POST",
+                    f"{base_url}/embeddings",
+                    {
+                        "model": alias,
+                        "input": ["a red circle", "a blue ocean wave"],
+                    },
+                )
+            except (CanaryProbeError, httpx.HTTPError, TypeError, ValueError) as exc:
+                result = None
+                inference_error = exc
+        else:
+            try:
+                inference_dispatched = True
+                result = await _request_json(
+                    client, "POST", f"{base_url}/chat/completions", _chat_payload(role, alias)
+                )
+            except (CanaryProbeError, httpx.HTTPError, TypeError, ValueError) as exc:
+                result = None
+                inference_error = exc
+        post_capabilities = await _request_json(client, "GET", f"{origin}/api/node/capabilities")
+        post_resolved, post_digest, post_release_id = _inventory_for_alias(
+            alias, models_payload, post_capabilities
+        )
+        observed_release_ids.add(post_release_id)
+        if len(observed_release_ids) > 1:
+            raise CanaryProbeError("release_changed")
+        if (post_resolved, post_digest, post_release_id) != (resolved, digest, release_id):
+            raise CanaryProbeError("provenance_changed")
+        if inference_error is not None:
+            raise CanaryProbeError("inference_failed") from inference_error
+        if role == "embedding":
+            _validate_embedding_result(result, resolved)
+        else:
+            _validate_chat_result(role, result, resolved)
+        return resolved, digest, release_id
+    except asyncio.CancelledError:
+        primary_cancelled = True
+        raise
+    finally:
+        if inference_dispatched:
+            try:
+                await _shielded_unload(ollama_client, ollama_base_url, resolved)
+            except _CanaryCleanupError:
+                cleanup_failure.set()
+                if not primary_cancelled:
+                    raise
 
 
 def _role_result(
@@ -446,13 +561,18 @@ async def verify_node_inference(
     roles: Sequence[str],
     timeouts: Mapping[str, float],
     transport: httpx.AsyncBaseTransport | None = None,
+    *,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    ollama_transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
     normalized_url = validate_loopback_base_url(base_url)
+    normalized_ollama_url = validate_loopback_ollama_base_url(ollama_base_url)
     normalized_key = _validate_api_key(api_key)
     selected = validate_roles(roles)
     normalized_timeouts = validate_role_timeouts(selected, timeouts)
     results: list[dict[str, Any]] = []
     observed_release_ids: set[str] = set()
+    cleanup_failure = asyncio.Event()
     headers = {"Authorization": f"Bearer {normalized_key}", "Accept": "application/json"}
     client_options: dict[str, Any] = {
         "headers": headers,
@@ -462,13 +582,45 @@ async def verify_node_inference(
     }
     if transport is not None:
         client_options["transport"] = transport
-    async with httpx.AsyncClient(**client_options) as client:
+    ollama_client_options: dict[str, Any] = {
+        "headers": {"Accept": "application/json"},
+        "timeout": None,
+        "trust_env": False,
+        "follow_redirects": False,
+    }
+    if ollama_transport is not None:
+        ollama_client_options["transport"] = ollama_transport
+    async with (
+        httpx.AsyncClient(**client_options) as client,
+        httpx.AsyncClient(**ollama_client_options) as ollama_client,
+    ):
         for role in selected:
             started = time.monotonic()
+            if cleanup_failure.is_set():
+                results.append(_role_result(role, "failed", 0, utc_timestamp()))
+                continue
             try:
                 resolved, digest, release_id = await asyncio.wait_for(
-                    _probe_role(client, normalized_url, role, observed_release_ids),
+                    _probe_role(
+                        client,
+                        ollama_client,
+                        normalized_url,
+                        normalized_ollama_url,
+                        role,
+                        observed_release_ids,
+                        cleanup_failure,
+                    ),
                     timeout=normalized_timeouts[role],
+                )
+            except _CanaryCleanupError:
+                cleanup_failure.set()
+                results.append(
+                    _role_result(
+                        role,
+                        "failed",
+                        round((time.monotonic() - started) * 1000),
+                        utc_timestamp(),
+                    )
                 )
             except asyncio.TimeoutError:
                 results.append(
