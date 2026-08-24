@@ -358,13 +358,16 @@ Rerun the installer after changing those settings.
 
 - App, Ollama, noVNC, and MCP examples bind to loopback; the app also rejects non-loopback peers if it is accidentally started on a broader socket.
 - `LOCALLLM_API_KEY` gates `/v1/*` plus every image job/output route and image
-  mutation; only image status remains loopback-public. Other management
-  `/api/*` routes—including conversations,
-  search, research, and Agent planning/execution—rely on the loopback peer
-  restriction; all browser requests to `/api/*` and `/v1/*` also receive
+  mutation; only image status remains loopback-public. `POST /api/search` can
+  independently require `LOCALLLM_SEARCH_API_KEY`; when configured, only one
+  exact Bearer header carrying that distinct key is accepted. Other management
+  `/api/*` routes—including conversations, research, and Agent
+  planning/execution—rely on the loopback peer restriction; all browser
+  requests to `/api/*` and `/v1/*` also receive
   origin/fetch-site checks. Native same-host processes can invoke them. The
   shipped `local-dev-key` is a development placeholder, not a secret; do not
-  proxy or tunnel port 8008 without adding authentication and authorization.
+  proxy or tunnel raw port 8008. Expose only exact reviewed paths through a
+  separate authenticated default-deny gateway.
 - The optional browser harness is a same-host test fixture, not an authentication boundary: Xvfb disables X access control, x11vnc is passwordless, and Chrome DevTools is unauthenticated. Never forward, proxy, or tunnel ports `5930`, `6130`, or `9470`, and stop the harness after use.
 - Browser API requests enforce an origin/fetch-site boundary, HTTP hosts are allowlisted, and the app emits a restrictive content-security policy plus anti-framing headers.
 - Playground threads persist in a private project-local SQLite database and can

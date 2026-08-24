@@ -8,14 +8,37 @@ to discover or invoke tools reliably on its own.
 
 These management routes use `http://127.0.0.1:8008/api/...`; they are separate
 from the OpenAI-compatible `/v1/*` surface. Search, Research, conversations,
-grounded Chat, and Agent routes do **not** consult `LOCALLLM_API_KEY`. Every
-image job/output read and mutation requires it; only `GET /api/images/status`
-is loopback-public. Every route also relies on the fixed loopback peer
-restriction plus browser origin/fetch-site checks, so a native same-host process
-can still call the ungated routes. Do not proxy or tunnel port 8008 without first
-adding complete authentication and authorization. See
+grounded Chat, and Agent routes do **not** consult `LOCALLLM_API_KEY`.
+`POST /api/search` instead supports its own application credential,
+`LOCALLLM_SEARCH_API_KEY`. When that value is configured, the route requires
+exactly one `Authorization: Bearer <search-key>` header. The scheme spelling,
+single space, token, and header cardinality are exact; missing, duplicated,
+malformed, or wrong credentials return the same HTTP 401 response with
+`Cache-Control: no-store`. The key must use at most 512 visible ASCII characters
+without whitespace and must differ from `LOCALLLM_API_KEY`. Leaving it empty
+preserves the original unauthenticated loopback-only quick-search workflow.
+
+Every image job/output read and mutation requires `LOCALLLM_API_KEY`; only
+`GET /api/images/status` is loopback-public. Every route also relies on the fixed
+loopback peer restriction plus browser origin/fetch-site checks, so a native
+same-host process can still call ungated routes. Never proxy or tunnel raw port
+8008. Publish only an exact reviewed path through a separately authenticated,
+default-deny access-control layer. See
 [OpenAI API compatibility](openai-api-compatibility.md) for the complete gateway
 boundary.
+
+For a protected search worker, write a strong random value only into the
+owner-private production `.env` and the worker's separate upstream credential
+store:
+
+```dotenv
+LOCALLLM_SEARCH_API_KEY=
+```
+
+The blank line above is deliberately not a usable secret. Populate it privately,
+restart LocalLLM through the reviewed service workflow, and configure the worker
+to inject the same value in the Authorization header. Do not place the value in
+Git, manifests, unit arguments, logs, screenshots, or documentation.
 
 ## Provider federation
 
@@ -83,7 +106,9 @@ middleware.
 ## Quick search
 
 `GET /api/search/status` returns enabled/configured providers and limits without
-returning credentials. It is a configuration/capability description, not a live
+returning credentials. Its no-store `authentication` object reports only whether
+the dedicated Bearer credential is required, the supported scheme, and its
+quick-search scope. It is a configuration/capability description, not a live
 provider health check; per-request diagnostics show actual success or failure.
 
 `POST /api/search` accepts:

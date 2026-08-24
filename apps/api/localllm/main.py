@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import math
@@ -124,6 +125,10 @@ class McpInvestigationRequest(StrictRequest):
 
 class OpenAIAuthenticationError(Exception):
     """Authentication failure that must retain an OpenAI-compatible body."""
+
+
+class SearchAuthenticationError(Exception):
+    """Authentication failure scoped only to the quick-search application route."""
 
 
 class _RequestBodyTooLarge(BaseException):
@@ -516,6 +521,36 @@ def require_api_key(
         raise OpenAIAuthenticationError
 
 
+def require_search_api_key(
+    request: Request,
+    current: Settings = Depends(get_settings),
+) -> None:
+    """Require one exact search-scoped Bearer header when an operator configures it."""
+
+    search_api_key = current.search_api_key.get_secret_value()
+    if not search_api_key:
+        return
+
+    # Inspect the ASGI header list directly: mapping-style access can combine duplicate
+    # Authorization fields and make their security meaning framework-dependent.
+    authorization_values = tuple(
+        value
+        for name, value in request.scope.get("headers", ())
+        if name.lower() == b"authorization"
+    )
+    if len(authorization_values) != 1:
+        raise SearchAuthenticationError
+
+    authorization = authorization_values[0]
+    prefix = b"Bearer "
+    if not authorization.startswith(prefix):
+        raise SearchAuthenticationError
+    candidate = authorization[len(prefix) :]
+    expected = search_api_key.encode("ascii")
+    if not hmac.compare_digest(candidate, expected):
+        raise SearchAuthenticationError
+
+
 def _passthrough(response: httpx.Response) -> Response:
     media_type = response.headers.get("content-type", "application/json").split(";")[0]
     try:
@@ -547,6 +582,19 @@ async def openai_authentication_error(
 ) -> Response:
     response = _openai_error(401, "Invalid LocalLLM API key", "authentication_error")
     response.headers["WWW-Authenticate"] = "Bearer"
+    return response
+
+
+@app.exception_handler(SearchAuthenticationError)
+async def search_authentication_error(
+    _request: Request, _exc: SearchAuthenticationError
+) -> Response:
+    response = JSONResponse(
+        status_code=401,
+        content={"detail": "Invalid search API key"},
+    )
+    response.headers["WWW-Authenticate"] = "Bearer"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -896,16 +944,34 @@ async def compact_conversation(
 
 
 @app.get("/api/search/status")
-async def search_status(manager: ResearchManager = Depends(get_research)) -> dict[str, Any]:
+async def search_status(
+    current: Settings = Depends(get_settings),
+    manager: ResearchManager = Depends(get_research),
+) -> Response:
     """Describe search capabilities without exposing provider credentials."""
 
-    return manager.provider_status()
+    content = manager.provider_status()
+    content["authentication"] = {
+        "required": bool(current.search_api_key.get_secret_value()),
+        "scheme": "bearer",
+        "scope": "quick-search",
+    }
+    response = JSONResponse(content=content)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
-@app.post("/api/search", response_model=SearchResponse)
+@app.post(
+    "/api/search",
+    response_model=SearchResponse,
+    dependencies=[Depends(require_search_api_key)],
+)
 async def quick_search(
-    request: Request, manager: ResearchManager = Depends(get_research)
+    request: Request,
+    response: Response,
+    manager: ResearchManager = Depends(get_research),
 ) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
     payload = await _bounded_json_model(request, SearchRequest, MAX_SEARCH_JSON_BYTES)
     outcome = await manager.quick_search(payload.query, payload.mode, payload.limit)
     return outcome.public_dict()

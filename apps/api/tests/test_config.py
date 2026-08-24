@@ -219,6 +219,40 @@ def test_search_provider_credentials_use_localllm_environment_namespace(
     assert settings.search_serpapi_api_key == "scholar-secret"
 
 
+def test_search_application_key_uses_dedicated_environment_variable_and_stays_masked(
+    monkeypatch,
+) -> None:
+    secret = "independent-search-credential-0123456789"
+    monkeypatch.setenv("LOCALLLM_SEARCH_API_KEY", secret)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.search_api_key.get_secret_value() == secret
+    assert secret not in repr(settings)
+    assert secret not in settings.model_dump_json()
+
+
+def test_search_application_key_must_not_reuse_openai_compatible_key() -> None:
+    secret = "shared-credential"
+    with pytest.raises(ValueError, match="must be distinct") as exc_info:
+        Settings(
+            api_key=secret,
+            search_api_key=secret,
+            _env_file=None,
+        )
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "search_api_key",
+    ["contains space", "contains\ttab", "contains\nnewline", "unicode-密钥", "x" * 513],
+)
+def test_search_application_key_rejects_ambiguous_header_values(search_api_key: str) -> None:
+    with pytest.raises(ValueError, match="Search API key") as exc_info:
+        Settings(search_api_key=search_api_key, _env_file=None)
+    assert search_api_key not in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

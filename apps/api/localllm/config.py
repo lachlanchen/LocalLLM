@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
@@ -49,6 +49,7 @@ class Settings(BaseSettings):
         env_file=(".env", "../../.env"),
         env_prefix="LOCALLLM_",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     host: str = "127.0.0.1"
@@ -97,8 +98,13 @@ class Settings(BaseSettings):
     image_generation_gpu: int = Field(default=0, ge=0, le=15)
     image_generation_timeout_seconds: int = Field(default=300, ge=60, le=900)
 
-    # Search credentials are optional. Providers with no key remain available, while
-    # configured providers are federated and their failures are reported per request.
+    # Application authorization for the quick-search route is independent from both
+    # the OpenAI-compatible API key and outbound provider credentials. Leaving this
+    # empty preserves the original loopback-only local workflow.
+    search_api_key: SecretStr = SecretStr("")
+
+    # Search provider credentials are optional. Providers with no key remain available,
+    # while configured providers are federated and their failures are reported per request.
     search_brave_api_key: str = ""
     search_tavily_api_key: str = ""
     search_serper_api_key: str = ""
@@ -163,6 +169,22 @@ class Settings(BaseSettings):
             raise ValueError("LocalLLM release ID must use the bounded non-secret ID syntax")
         return candidate
 
+    @field_validator("search_api_key")
+    @classmethod
+    def validate_search_api_key(cls, value: SecretStr) -> SecretStr:
+        candidate = value.get_secret_value()
+        if not candidate:
+            return value
+        try:
+            encoded = candidate.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Search API key must use visible ASCII characters") from exc
+        if len(encoded) > 512 or any(byte < 0x21 or byte > 0x7E for byte in encoded):
+            raise ValueError(
+                "Search API key must contain at most 512 visible ASCII characters without whitespace"
+            )
+        return value
+
     @field_validator("ollama_base_url")
     @classmethod
     def require_local_ollama(cls, value: str) -> str:
@@ -191,6 +213,11 @@ class Settings(BaseSettings):
                 "LocalLLM Studio is loopback-only and uses the fixed loopback endpoint "
                 "127.0.0.1:8008; "
                 "add a separately authenticated access-control layer before any remote use"
+            )
+        search_api_key = self.search_api_key.get_secret_value()
+        if search_api_key and search_api_key == self.api_key:
+            raise ValueError(
+                "Search API key must be distinct from the OpenAI-compatible API key"
             )
         if self.node_canary_receipt_path is not None:
             if not _IMMUTABLE_RELEASE_ID.fullmatch(self.release_id):

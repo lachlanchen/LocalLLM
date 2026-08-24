@@ -1,10 +1,37 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+from collections.abc import Iterator
+from contextlib import contextmanager
 
-from localllm.main import app
+import pytest
+from fastapi.testclient import TestClient
+from starlette.requests import Request
+
+from localllm.config import Settings, get_settings
+from localllm.main import SearchAuthenticationError, app, require_search_api_key
 from localllm.research import ResearchTask
 from localllm.search import ProviderDiagnostic, ResearchSource, SearchOutcome
+
+SEARCH_API_KEY = "search-only-credential-0123456789abcdef"
+OPENAI_API_KEY = "openai-only-credential-0123456789abcdef"
+
+
+@contextmanager
+def configured_search_auth() -> Iterator[Settings]:
+    settings = Settings(
+        api_key=OPENAI_API_KEY,
+        search_api_key=SEARCH_API_KEY,
+        _env_file=None,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        yield settings
+    finally:
+        app.dependency_overrides.clear()
+
+
+def empty_search_outcome(query: str, mode: str) -> SearchOutcome:
+    return SearchOutcome(query=query, mode=mode, sources=[], providers=[])
 
 
 def normalized_source() -> ResearchSource:
@@ -43,6 +70,165 @@ def test_search_status_exposes_capabilities_without_credentials() -> None:
         "google_scholar_serpapi",
     }
     assert "api_key" not in response.text.lower()
+    assert response.headers["cache-control"] == "no-store"
+    assert body["authentication"] == {
+        "required": False,
+        "scheme": "bearer",
+        "scope": "quick-search",
+    }
+
+
+def test_search_status_reports_auth_requirement_without_revealing_credential() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.get("/api/search/status")
+
+    assert response.status_code == 200
+    assert response.json()["authentication"] == {
+        "required": True,
+        "scheme": "bearer",
+        "scope": "quick-search",
+    }
+    assert SEARCH_API_KEY not in response.text
+    assert OPENAI_API_KEY not in response.text
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        None,
+        {"Authorization": "Bearer wrong-search-credential"},
+        {"Authorization": f"bearer {SEARCH_API_KEY}"},
+        {"Authorization": f"Bearer  {SEARCH_API_KEY}"},
+        {"Authorization": f"Bearer\t{SEARCH_API_KEY}"},
+        {"Authorization": f"Bearer {SEARCH_API_KEY} "},
+        {"Authorization": f"Basic {SEARCH_API_KEY}"},
+        {"Authorization": "Bearer"},
+    ],
+)
+def test_configured_search_rejects_missing_wrong_or_malformed_bearer(
+    headers: dict[str, str] | None,
+) -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers=headers,
+                json={"query": "verified research", "mode": "papers"},
+            )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid search API key"}
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert SEARCH_API_KEY not in response.text
+    assert OPENAI_API_KEY not in response.text
+
+
+def test_configured_search_rejects_duplicate_authorization_headers() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers=[
+                    ("Authorization", f"Bearer {SEARCH_API_KEY}"),
+                    ("Authorization", f"Bearer {SEARCH_API_KEY}"),
+                ],
+                json={"query": "verified research", "mode": "papers"},
+            )
+
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        b"Bearer\x00search-only-credential-0123456789abcdef",
+        b"Bearer\rsearch-only-credential-0123456789abcdef",
+        b"Bearer\nsearch-only-credential-0123456789abcdef",
+        b"Bearer\x7fsearch-only-credential-0123456789abcdef",
+    ],
+)
+def test_search_dependency_rejects_control_characters_in_raw_authorization(
+    authorization: bytes,
+) -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/search",
+            "headers": [(b"authorization", authorization)],
+        }
+    )
+    settings = Settings(
+        api_key=OPENAI_API_KEY,
+        search_api_key=SEARCH_API_KEY,
+        _env_file=None,
+    )
+
+    with pytest.raises(SearchAuthenticationError):
+        require_search_api_key(request, settings)
+
+
+def test_search_credential_is_scoped_to_search_and_openai_key_cannot_authorize_search() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            search_with_openai_key = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                json={"query": "verified research", "mode": "papers"},
+            )
+            openai_with_search_key = client.get(
+                "/v1/models",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+            )
+
+    assert search_with_openai_key.status_code == 401
+    assert openai_with_search_key.status_code == 401
+    assert openai_with_search_key.json()["error"]["type"] == "authentication_error"
+
+
+def test_configured_search_accepts_one_exact_bearer_and_marks_response_no_store() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            manager = client.app.state.research
+
+            async def search(query: str, mode: str, limit: int):
+                assert (query, mode, limit) == ("verified research", "papers", 5)
+                return empty_search_outcome(query, mode)
+
+            manager.quick_search = search
+            response = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+                json={"query": "verified research", "mode": "papers", "limit": 5},
+            )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert response.json()["query"] == "verified research"
+
+
+def test_unconfigured_search_preserves_loopback_unauthenticated_behavior() -> None:
+    with TestClient(app) as client:
+        manager = client.app.state.research
+
+        async def search(query: str, mode: str, limit: int):
+            return empty_search_outcome(query, mode)
+
+        manager.quick_search = search
+        response = client.post(
+            "/api/search",
+            json={"query": "verified research", "mode": "web"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_quick_search_endpoint_returns_normalized_ranked_sources() -> None:
