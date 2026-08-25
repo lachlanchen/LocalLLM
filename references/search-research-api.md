@@ -121,6 +121,12 @@ provider health check; per-request diagnostics show actual success or failure.
 }
 ```
 
+Every response on this exact route is `Cache-Control: no-store`, including
+authentication, body-limit, JSON-validation, provider, and internal-error
+responses. The response boundary also removes every `Set-Cookie` field. This
+policy is exact-path scoped and does not change neighboring management or `/v1`
+routes.
+
 `query` is 3–800 characters, `limit` is 1–30 and is also capped by
 `LOCALLLM_SEARCH_MAX_RESULTS`, and `mode` is `web`, `papers`, or `both`. The
 provider-bound copy of `query` applies the same URL/URI and local-path redaction

@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -32,6 +33,11 @@ def configured_search_auth() -> Iterator[Settings]:
 
 def empty_search_outcome(query: str, mode: str) -> SearchOutcome:
     return SearchOutcome(query=query, mode=mode, sources=[], providers=[])
+
+
+def assert_private_search_response(response) -> None:
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
 
 
 def normalized_source() -> ResearchSource:
@@ -190,6 +196,8 @@ def test_search_credential_is_scoped_to_search_and_openai_key_cannot_authorize_s
     assert search_with_openai_key.status_code == 401
     assert openai_with_search_key.status_code == 401
     assert openai_with_search_key.json()["error"]["type"] == "authentication_error"
+    assert openai_with_search_key.headers["www-authenticate"] == "Bearer"
+    assert "cache-control" not in openai_with_search_key.headers
 
 
 def test_configured_search_accepts_one_exact_bearer_and_marks_response_no_store() -> None:
@@ -229,6 +237,120 @@ def test_unconfigured_search_preserves_loopback_unauthenticated_behavior() -> No
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_authenticated_search_validation_error_is_never_cacheable() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+                json={"query": "x", "mode": "web"},
+            )
+
+    assert response.status_code == 422
+    assert_private_search_response(response)
+
+
+def test_authenticated_search_malformed_json_is_never_cacheable() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers={
+                    "Authorization": f"Bearer {SEARCH_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                content=b'{"query":',
+            )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Request body must be valid JSON"}
+    assert_private_search_response(response)
+
+
+def test_authenticated_search_oversized_declared_body_is_never_cacheable() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers={
+                    "Authorization": f"Bearer {SEARCH_API_KEY}",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(20 * 1024),
+                },
+                content=b"{}",
+            )
+
+    assert response.status_code == 413
+    assert_private_search_response(response)
+
+
+def test_authenticated_search_oversized_chunked_body_is_never_cacheable() -> None:
+    def oversized_chunks():
+        yield b'{"query":"verified research","padding":"'
+        yield b"x" * (20 * 1024)
+        yield b'"}'
+
+    with configured_search_auth():
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                headers={
+                    "Authorization": f"Bearer {SEARCH_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                content=oversized_chunks(),
+            )
+
+    assert response.status_code == 413
+    assert_private_search_response(response)
+
+
+def test_authenticated_search_provider_http_error_cannot_set_cache_or_cookie() -> None:
+    with configured_search_auth():
+        with TestClient(app) as client:
+            manager = client.app.state.research
+
+            async def search(query: str, mode: str, limit: int):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Search provider unavailable",
+                    headers={
+                        "Cache-Control": "public, max-age=3600",
+                        "Set-Cookie": "provider-session=must-not-survive",
+                    },
+                )
+
+            manager.quick_search = search
+            response = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+                json={"query": "verified research", "mode": "both"},
+            )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Search provider unavailable"}
+    assert_private_search_response(response)
+
+
+def test_authenticated_search_unhandled_internal_error_is_never_cacheable() -> None:
+    with configured_search_auth():
+        with TestClient(app, raise_server_exceptions=False) as client:
+            manager = client.app.state.research
+
+            async def search(query: str, mode: str, limit: int):
+                raise RuntimeError("simulated internal provider failure")
+
+            manager.quick_search = search
+            response = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+                json={"query": "verified research", "mode": "both"},
+            )
+
+    assert response.status_code == 500
+    assert_private_search_response(response)
 
 
 def test_quick_search_endpoint_returns_normalized_ranked_sources() -> None:

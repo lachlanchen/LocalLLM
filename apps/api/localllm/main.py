@@ -367,6 +367,33 @@ class BrowserSecurityBoundaryMiddleware:
         await self.app(scope, receive, send_with_security_headers)
 
 
+class SearchResponseSecurityMiddleware:
+    """Make every exact quick-search response private, including outer 500 responses."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http" or scope.get("path") != "/api/search":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_private_response(message: Message) -> None:
+            if message.get("type") == "http.response.start":
+                # Rebuild rather than mapping-update so duplicate Set-Cookie and
+                # Cache-Control fields cannot survive framework or provider errors.
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", ())
+                    if name.lower() not in {b"cache-control", b"set-cookie"}
+                ]
+                headers.append((b"cache-control", b"no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_private_response)
+
+
 def _bounded_json_integer(value: str) -> int:
     if len(value) > 256:
         raise ValueError("JSON integer is too long")
@@ -460,7 +487,14 @@ async def lifespan(app: FastAPI):
         await app.state.research.shutdown()
 
 
-app = FastAPI(
+class LocalLLMApplication(FastAPI):
+    """Place the exact search response boundary outside FastAPI's 500 handler."""
+
+    def build_middleware_stack(self) -> ASGIApp:
+        return SearchResponseSecurityMiddleware(super().build_middleware_stack())
+
+
+app = LocalLLMApplication(
     title="LocalLLM Studio API",
     version="0.1.0",
     description="Private model control plane with OpenAI-compatible endpoints.",
@@ -968,10 +1002,8 @@ async def search_status(
 )
 async def quick_search(
     request: Request,
-    response: Response,
     manager: ResearchManager = Depends(get_research),
 ) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"
     payload = await _bounded_json_model(request, SearchRequest, MAX_SEARCH_JSON_BYTES)
     outcome = await manager.quick_search(payload.query, payload.mode, payload.limit)
     return outcome.public_dict()
