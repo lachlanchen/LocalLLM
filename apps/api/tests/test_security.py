@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
-from localllm.main import _static_web_cache_control, app
+from localllm.main import StaticWebCacheMiddleware, _static_web_cache_control, app
 from localllm.system import _command, storage_status
 
 
@@ -111,6 +113,41 @@ def test_static_web_cache_policy_is_release_safe(
     expected: str | None,
 ) -> None:
     assert _static_web_cache_control(path, status_code, content_type) == expected
+
+
+@pytest.mark.parametrize("method", ["get", "head"])
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/manifest.webmanifest", "application/manifest+json"),
+        ("/sw.js", "text/javascript"),
+    ],
+)
+def test_required_pwa_public_files_are_real_cache_safe_routes(
+    method: str,
+    path: str,
+    content_type: str,
+) -> None:
+    public_dir = Path(__file__).resolve().parents[3] / "apps" / "web" / "public"
+    static_app = FastAPI()
+    static_app.add_middleware(StaticWebCacheMiddleware)
+    static_app.mount("/", StaticFiles(directory=public_dir), name="pwa-public")
+
+    with TestClient(static_app) as client:
+        response = getattr(client, method)(path)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(content_type)
+    assert response.headers["cache-control"] == "no-cache"
+    assert "set-cookie" not in response.headers
+    if method == "head":
+        assert response.content == b""
+    elif path == "/manifest.webmanifest":
+        assert response.json()["start_url"] == "/"
+        assert response.json()["scope"] == "/"
+    else:
+        assert "self.skipWaiting()" in response.text
+        assert "fetch(event.request)" in response.text
 
 
 def test_static_web_cache_headers_are_applied_at_the_response_boundary() -> None:

@@ -1,0 +1,19 @@
+{
+  "name": "LocalLLM Studio",
+  "short_name": "LocalLLM",
+  "description": "Private local language, vision, research, and agent tools.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f5ed",
+  "theme_color": "#f7f5ed",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
