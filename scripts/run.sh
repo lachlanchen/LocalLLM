@@ -4,9 +4,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
-if [[ ! -d apps/web/dist ]]; then
-  npm run build
-fi
+scripts/ensure-web-dist.sh --ensure
 
 ollama_pid=""
 api_pid=""

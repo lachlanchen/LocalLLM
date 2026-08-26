@@ -17,6 +17,8 @@ for required_command in awk chmod curl id mkdir mktemp mv sed sleep systemctl; d
   command -v "$required_command" >/dev/null || die "missing prerequisite: $required_command"
 done
 
+"$project_root/scripts/ensure-web-dist.sh" --check
+
 read_numeric_setting() {
   local name="$1"
   local fallback="$2"

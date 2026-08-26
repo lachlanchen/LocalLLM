@@ -13,7 +13,7 @@ command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/" 
 
 npm ci
 uv sync --project apps/api --extra dev --locked
-npm run build
+scripts/ensure-web-dist.sh --ensure
 scripts/install-ollama-local.sh
 
 if [[ ! -f .env ]]; then
