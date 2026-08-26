@@ -394,6 +394,51 @@ class SearchResponseSecurityMiddleware:
         await self.app(scope, receive, send_private_response)
 
 
+def _static_web_cache_control(path: str, status_code: int, content_type: str) -> str | None:
+    """Keep the app shell fresh while retaining immutable, content-addressed assets."""
+
+    if path.startswith(("/api/", "/v1/")):
+        return None
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type == "text/html":
+        return "no-store"
+    if path.startswith("/assets/"):
+        if 200 <= status_code < 300:
+            return "public, max-age=31536000, immutable"
+        return "no-store"
+    if path in {"/manifest.webmanifest", "/sw.js", "/favicon.svg"}:
+        return "no-cache"
+    return None
+
+
+class StaticWebCacheMiddleware:
+    """Apply cache policy at the response boundary, including static-file failures."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http" or scope.get("method") not in {"GET", "HEAD"}:
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+
+        async def send_with_cache_policy(message: Message) -> None:
+            if message.get("type") == "http.response.start":
+                response_headers = MutableHeaders(scope=message)
+                cache_control = _static_web_cache_control(
+                    path,
+                    int(message.get("status", 500)),
+                    response_headers.get("content-type", ""),
+                )
+                if cache_control is not None:
+                    response_headers["Cache-Control"] = cache_control
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache_policy)
+
+
 def _bounded_json_integer(value: str) -> int:
     if len(value) > 256:
         raise ValueError("JSON integer is too long")
@@ -503,6 +548,7 @@ app = LocalLLMApplication(
     redoc_url=None,
 )
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(StaticWebCacheMiddleware)
 settings = get_settings()
 loopback_origins = [
     f"http://127.0.0.1:{settings.port}",

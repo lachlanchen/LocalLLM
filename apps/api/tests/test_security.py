@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from localllm.main import app
+from localllm.main import _static_web_cache_control, app
 from localllm.system import _command, storage_status
 
 
@@ -83,3 +83,47 @@ def test_security_headers_and_trusted_host() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "font-src 'self' data:" in response.headers["content-security-policy"]
     assert untrusted.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("path", "status_code", "content_type", "expected"),
+    [
+        ("/", 200, "text/html; charset=utf-8", "no-store"),
+        ("/conversation/one", 200, "text/html", "no-store"),
+        (
+            "/assets/index-a1b2c3.js",
+            200,
+            "text/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
+        ),
+        ("/assets/retired.js", 404, "application/json", "no-store"),
+        ("/manifest.webmanifest", 200, "application/manifest+json", "no-cache"),
+        ("/sw.js", 200, "text/javascript", "no-cache"),
+        ("/favicon.svg", 200, "image/svg+xml", "no-cache"),
+        ("/api/system/status", 200, "application/json", None),
+        ("/v1/models", 401, "application/json", None),
+    ],
+)
+def test_static_web_cache_policy_is_release_safe(
+    path: str,
+    status_code: int,
+    content_type: str,
+    expected: str | None,
+) -> None:
+    assert _static_web_cache_control(path, status_code, content_type) == expected
+
+
+def test_static_web_cache_headers_are_applied_at_the_response_boundary() -> None:
+    with TestClient(app) as client:
+        html = client.get("/")
+        current_asset = client.get("/assets/index-BL5prAB3.js")
+        retired_asset = client.get("/assets/retired-build.js")
+
+    if html.headers.get("content-type", "").startswith("text/html"):
+        assert html.headers["cache-control"] == "no-store"
+    if current_asset.status_code == 200:
+        assert current_asset.headers["cache-control"] == (
+            "public, max-age=31536000, immutable"
+        )
+    assert retired_asset.status_code == 404
+    assert retired_asset.headers["cache-control"] == "no-store"
