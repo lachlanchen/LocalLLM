@@ -169,10 +169,14 @@ describe('mobile vision image preparation', () => {
     const heic = heicBytes()
     const removeAttribute = vi.fn()
     const revokeObjectUrl = vi.fn()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0)
     const image = {
       decoding: '',
       src: '',
-      decode: () => new Promise<void>(() => undefined),
+      decode: () => {
+        now.mockReturnValue(6)
+        return new Promise<void>(() => undefined)
+      },
       removeAttribute,
       naturalWidth: 0,
       naturalHeight: 0,
@@ -181,18 +185,22 @@ describe('mobile vision image preparation', () => {
       createElement: vi.fn(() => image),
     } as unknown as Document
 
-    await expect(fileToCanonicalImageDataUrl(
-      imageFile(heic, 'IMG_0001.HEIC', 'image/heic'),
-      {
-        documentImpl,
-        createImageBitmapImpl: null,
-        createObjectUrl: () => 'blob:test-photo',
-        revokeObjectUrl,
-        timeoutMs: 5,
-      },
-    )).rejects.toThrow('timed out before any photo was sent')
-    expect(removeAttribute).toHaveBeenCalledWith('src')
-    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:test-photo')
+    try {
+      await expect(fileToCanonicalImageDataUrl(
+        imageFile(heic, 'IMG_0001.HEIC', 'image/heic'),
+        {
+          documentImpl,
+          createImageBitmapImpl: null,
+          createObjectUrl: () => 'blob:test-photo',
+          revokeObjectUrl,
+          timeoutMs: 5,
+        },
+      )).rejects.toThrow('timed out before any photo was sent')
+      expect(removeAttribute).toHaveBeenCalledWith('src')
+      expect(revokeObjectUrl).toHaveBeenCalledWith('blob:test-photo')
+    } finally {
+      now.mockRestore()
+    }
   })
 
   it('enforces four ordered attachments and the 16 MB post-canonical budget', () => {
