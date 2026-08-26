@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from localllm.catalog import MODEL_CATALOG
 from localllm.main import _proxy_openai, app
+from localllm.ollama import OllamaTransportError
 
 
 class FakeOllama:
@@ -383,6 +384,32 @@ def test_streaming_connection_failure_is_openai_compatible() -> None:
             "type": "service_unavailable",
             "param": None,
             "code": None,
+        }
+    }
+
+
+def test_transport_failure_has_sanitized_code_and_request_id() -> None:
+    class InterruptedOllama(FakeProxyOllama):
+        async def proxy_stream(self, endpoint: str, payload: dict[str, Any]) -> FakeStream:
+            raise OllamaTransportError(request_id="ollama_test_request")
+
+    with TestClient(app) as client:
+        client.app.state.ollama = InterruptedOllama()
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer local-dev-key"},
+            json={"model": "localllm-fast", "messages": [], "stream": True},
+        )
+
+    assert response.status_code == 503
+    assert response.headers["x-request-id"] == "ollama_test_request"
+    assert response.json() == {
+        "error": {
+            "message": "The local model runtime is temporarily unavailable.",
+            "type": "service_unavailable",
+            "param": None,
+            "code": "ollama_upstream_unavailable",
+            "request_id": "ollama_test_request",
         }
     }
 

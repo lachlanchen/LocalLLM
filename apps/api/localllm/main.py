@@ -44,7 +44,7 @@ from .image_generation import router as image_generation_router
 from .mcp_bridge import investigate_with_mcp, mcp_status
 from .node_canary import ROLE_ALIASES, functional_readiness_document
 from .node_contract import node_capabilities_document, readiness_document
-from .ollama import OllamaClient, OllamaStream
+from .ollama import OllamaClient, OllamaStream, OllamaTransportError
 from .research import ResearchCapacityError, ResearchManager
 from .reverse_engineering import (
     MAX_UPLOAD_REQUEST_SIZE,
@@ -523,13 +523,18 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     prepare_private_data_dir(settings.data_dir)
     app.state.settings = settings
-    app.state.ollama = OllamaClient(settings)
-    app.state.research = ResearchManager(settings)
-    app.state.conversations = ConversationStore(settings.data_dir)
+    ollama = OllamaClient(settings)
     try:
-        yield
+        research = ResearchManager(settings)
+        app.state.ollama = ollama
+        app.state.research = research
+        app.state.conversations = ConversationStore(settings.data_dir)
+        try:
+            yield
+        finally:
+            await research.shutdown()
     finally:
-        await app.state.research.shutdown()
+        await ollama.aclose()
 
 
 class LocalLLMApplication(FastAPI):
@@ -642,18 +647,29 @@ def _passthrough(response: httpx.Response) -> Response:
         )
 
 
-def _openai_error(status_code: int, message: str, error_type: str = "upstream_error") -> Response:
-    return JSONResponse(
+def _openai_error(
+    status_code: int,
+    message: str,
+    error_type: str = "upstream_error",
+    *,
+    error_code: str | None = None,
+    request_id: str | None = None,
+) -> Response:
+    error: dict[str, Any] = {
+        "message": message,
+        "type": error_type,
+        "param": None,
+        "code": error_code,
+    }
+    if request_id is not None:
+        error["request_id"] = request_id
+    response = JSONResponse(
         status_code=status_code,
-        content={
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": None,
-            }
-        },
+        content={"error": error},
     )
+    if request_id is not None:
+        response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.exception_handler(OpenAIAuthenticationError)
@@ -717,12 +733,21 @@ def _openai_upstream_error(response: httpx.Response) -> Response:
 
 async def _streaming_passthrough(stream: OllamaStream) -> Response:
     response = stream.response
+    request_id = getattr(stream, "request_id", None)
     if response.is_error:
         try:
             await response.aread()
-            return _openai_upstream_error(response)
-        except httpx.HTTPError as exc:
-            return _openai_error(response.status_code, f"Could not read Ollama error: {exc}")
+            normalized = _openai_upstream_error(response)
+            if request_id is not None:
+                normalized.headers["X-Request-ID"] = request_id
+            return normalized
+        except httpx.HTTPError:
+            return _openai_error(
+                response.status_code,
+                "The local model returned an unreadable error response.",
+                error_code="ollama_error_body_unreadable",
+                request_id=request_id,
+            )
         finally:
             await stream.aclose()
 
@@ -731,6 +756,7 @@ async def _streaming_passthrough(stream: OllamaStream) -> Response:
         stream.iter_raw(),
         status_code=response.status_code,
         media_type=media_type,
+        headers={"X-Request-ID": request_id} if request_id is not None else None,
         background=BackgroundTask(stream.aclose),
     )
 
@@ -1231,6 +1257,14 @@ async def _proxy_openai(
         return _passthrough(response)
     except _ClientDisconnected:
         return _openai_error(499, "Client closed request", "request_cancelled")
+    except OllamaTransportError as exc:
+        return _openai_error(
+            exc.status_code,
+            str(exc.detail),
+            "service_unavailable",
+            error_code=exc.error_code,
+            request_id=exc.request_id,
+        )
     except HTTPException as exc:
         return _openai_error(exc.status_code, str(exc.detail), "service_unavailable")
 
