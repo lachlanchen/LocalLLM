@@ -16,7 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .config import prepare_private_data_dir
 from .grounded_chat import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGES,
     MAX_MESSAGE_TEXT_CHARS,
+    MAX_TOTAL_IMAGE_BYTES,
     _decode_data_image,
 )
 
@@ -126,7 +128,7 @@ class ConversationMessage(StrictModel):
     id: str | None = Field(default=None, min_length=1, max_length=100)
     role: Literal["system", "user", "assistant"]
     content: str = Field(max_length=MAX_MESSAGE_TEXT_CHARS)
-    image: str | None = None
+    images: list[str] = Field(default_factory=list, max_length=MAX_IMAGES)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     mode: ConversationMode | None = None
     sources: list[ConversationSource] = Field(
@@ -134,18 +136,38 @@ class ConversationMessage(StrictModel):
     )
     warning: str | None = Field(default=None, max_length=MAX_WARNING_CHARS)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_image(cls, value: Any) -> Any:
+        """Read historic singular attachments while emitting only ordered ``images``."""
+
+        if not isinstance(value, dict) or "image" not in value:
+            return value
+        migrated = dict(value)
+        legacy_image = migrated.pop("image")
+        current_images = migrated.get("images")
+        if legacy_image is None:
+            return migrated
+        if current_images not in (None, []):
+            raise ValueError("message cannot contain both image and images")
+        migrated["images"] = [legacy_image]
+        return migrated
+
     @model_validator(mode="after")
     def validate_message(self) -> ConversationMessage:
         if self.id is not None and not _MESSAGE_ID.fullmatch(self.id):
             raise ValueError("message id contains unsupported characters")
         if self.model is not None and not _MODEL_NAME.fullmatch(self.model):
             raise ValueError("message model contains unsupported characters")
-        if self.role == "user" and not self.content and self.image is None:
+        if self.role == "user" and not self.content and not self.images:
             raise ValueError("user messages cannot be empty")
-        if self.image is not None:
-            if len(self.image) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 64:
+        image_bytes = 0
+        for image in self.images:
+            if len(image) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 64:
                 raise ValueError("message image exceeds the encoded-size limit")
-            _decode_data_image(self.image)
+            image_bytes += len(_decode_data_image(image))
+        if image_bytes > MAX_TOTAL_IMAGE_BYTES:
+            raise ValueError("message images exceed the total decoded-size limit")
         return self
 
 
@@ -154,7 +176,7 @@ def _validate_messages(messages: list[ConversationMessage]) -> list[Conversation
     text_chars = sum(len(message.content) for message in messages)
     if text_chars > MAX_CONVERSATION_TOTAL_TEXT_CHARS:
         raise ValueError("conversation exceeds the total text limit")
-    images = [message.image for message in messages if message.image is not None]
+    images = [image for message in messages for image in message.images]
     if len(images) > MAX_CONVERSATION_IMAGES:
         raise ValueError("conversation contains too many images")
     decoded_bytes = sum(len(_decode_data_image(image)) for image in images)
@@ -262,7 +284,11 @@ def _utc_now() -> str:
 
 
 def _message_payloads(messages: list[ConversationMessage]) -> list[dict[str, Any]]:
-    return [message.model_dump(mode="json", exclude_none=True) for message in messages]
+    payloads = [message.model_dump(mode="json", exclude_none=True) for message in messages]
+    for payload in payloads:
+        if not payload["images"]:
+            payload.pop("images")
+    return payloads
 
 
 def _title_from_messages(messages: list[ConversationMessage]) -> str:
@@ -270,7 +296,7 @@ def _title_from_messages(messages: list[ConversationMessage]) -> str:
         if message.role != "user":
             continue
         title = re.sub(r"\s+", " ", message.content).strip()
-        if not title and message.image:
+        if not title and message.images:
             return "Image conversation"
         if title:
             if len(title) <= MAX_TITLE_CHARS:
@@ -672,8 +698,10 @@ class ConversationStore:
 
 def message_summary_text(message: dict[str, Any], limit: int = 2_000) -> str:
     text = re.sub(r"\s+", " ", str(message.get("content", ""))).strip()
-    if message.get("image"):
-        text = f"{text} [image attached]".strip()
+    image_count = len(message.get("images") or ([message["image"]] if message.get("image") else []))
+    if image_count:
+        suffix = "image attached" if image_count == 1 else f"{image_count} images attached"
+        text = f"{text} [{suffix}]".strip()
     if message.get("warning"):
         text = f"{text} [warning: {message['warning']}]".strip()
     return text[:limit]

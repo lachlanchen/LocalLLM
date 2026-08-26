@@ -9,6 +9,7 @@ import {
   MAX_CHAT_INPUT_CHARS,
   MAX_INFERENCE_TEXT_BYTES,
   persistDraftBeforeInference,
+  removeImageAt,
   restoredMessages,
   saveWithRevisionRetry,
   shouldAutoCompact,
@@ -30,12 +31,15 @@ describe('durable conversation state', () => {
   it('returns the exact persisted transcript, draft, and attachment after a rejected pre-save', async () => {
     const persisted = [...messages]
     const draft = '  Keep my exact spacing.\nAnd this newline.  '
-    const attachment = 'data:image/png;base64,ZXhhY3QtYXR0YWNobWVudA=='
+    const attachments = [
+      'data:image/png;base64,Zmlyc3Q=',
+      'data:image/jpeg;base64,c2Vjb25k',
+    ]
     const failure = new Error('archive quota reached')
     let attempts = 0
 
     const rejected = await persistDraftBeforeInference(
-      { messages: persisted, draft, attachment },
+      { messages: persisted, draft, attachments },
       async () => {
         attempts += 1
         throw failure
@@ -44,17 +48,17 @@ describe('durable conversation state', () => {
 
     expect(rejected).toEqual({
       ok: false,
-      rollback: { messages: persisted, draft, attachment },
+      rollback: { messages: persisted, draft, attachments },
       reason: failure,
     })
     if (!rejected.ok) {
       expect(rejected.rollback.messages).toBe(persisted)
       expect(rejected.rollback.draft).toBe(draft)
-      expect(rejected.rollback.attachment).toBe(attachment)
+      expect(rejected.rollback.attachments).toBe(attachments)
     }
 
     const retry = await persistDraftBeforeInference(
-      { messages: persisted, draft: 'smaller retry' },
+      { messages: persisted, draft: 'smaller retry', attachments: [] },
       async () => {
         attempts += 1
         return { revision: 9 }
@@ -66,7 +70,7 @@ describe('durable conversation state', () => {
 
   it('derives a compact title from the first user turn', () => {
     expect(conversationTitle(messages)).toBe('Explain the control loop in detail.')
-    expect(conversationTitle([{ id: 'image', role: 'user', content: '', image: 'data:image/png;base64,AA==' }])).toBe('Image conversation')
+    expect(conversationTitle([{ id: 'image', role: 'user', content: '', images: ['data:image/png;base64,AA=='] }])).toBe('Image conversation')
   })
 
   it('persists only finalized display metadata and restores stable IDs', () => {
@@ -79,6 +83,11 @@ describe('durable conversation state', () => {
       id: 'a1', role: 'assistant', content: 'A stable answer.', model: 'localllm-fast', mode: 'local',
     })
     expect(restoredMessages([{ role: 'assistant', content: 'Saved' }])[0].id).toBe('stored-0')
+    expect(restoredMessages([{
+      role: 'user', content: '', image: 'data:image/png;base64,bGVnYWN5',
+    }])[0]).toEqual({
+      id: 'stored-0', role: 'user', content: '', images: ['data:image/png;base64,bGVnYWN5'],
+    })
   })
 
   it('sends a persisted summary plus only the unsummarized tail', () => {
@@ -95,16 +104,25 @@ describe('durable conversation state', () => {
       id: `image-${index}`,
       role: 'user' as const,
       content: `image turn ${index}`,
-      image: `data:image/png;base64,${btoa(`image-${index}`)}`,
+      images: [`data:image/png;base64,${btoa(`image-${index}`)}`],
     }))
 
     const context = inferenceContext(imageTurns, '', 0)
 
-    expect(imageTurns.filter((message) => message.image)).toHaveLength(5)
-    expect(context.filter((message) => message.image)).toHaveLength(4)
-    expect(context[0].image).toBeUndefined()
+    expect(imageTurns.filter((message) => message.images?.length)).toHaveLength(5)
+    expect(context.filter((message) => message.images?.length)).toHaveLength(4)
+    expect(context[0].images).toBeUndefined()
     expect(context[0].content).toContain('preserved in local history')
-    expect(context.at(-1)?.image).toBeTruthy()
+    expect(context.at(-1)?.images).toBeTruthy()
+  })
+
+  it('preserves attachment order and removes exactly the selected thumbnail', () => {
+    const ordered = ['first', 'second', 'third', 'fourth']
+    const message: ChatMessage = { id: 'ordered', role: 'user', content: 'Compare', images: ordered }
+
+    expect(inferenceContext([message], '', 0)[0].images).toEqual(ordered)
+    expect(removeImageAt(ordered, 1)).toEqual(['first', 'third', 'fourth'])
+    expect(removeImageAt(ordered, 99)).toEqual(ordered)
   })
 
   it('bounds multilingual resumed context by UTF-8 bytes including its summary', () => {

@@ -59,7 +59,13 @@ import {
   shouldAutoRouteAgent,
   writeAgentAutoEnabled,
 } from './agentRouting'
-import { ApiError, api, fileToDataUrl, formatBytes, imageFileError, pullModel, streamAgentChat } from './api'
+import {
+  ApiError,
+  api,
+  formatBytes,
+  pullModel,
+  streamAgentChat,
+} from './api'
 import { BinaryDropZone } from './BinaryDropZone'
 import {
   abortBinaryOperation,
@@ -82,6 +88,7 @@ import {
   isTranscriptNearBottom,
   persistDraftBeforeInference,
   restoredMessages,
+  removeImageAt,
   saveWithRevisionRetry,
   shouldAutoCompact,
   storedMessages,
@@ -132,6 +139,12 @@ import type {
   SystemStatus,
   ViewId,
 } from './types'
+import {
+  canonicalImageSelectionError,
+  fileToCanonicalImageDataUrl,
+  imageFileError,
+  imageSelectionError,
+} from './visionImageClient'
 
 const NAV_ITEMS: Array<{ id: ViewId; label: string; hint: string; icon: LucideIcon }> = [
   { id: 'chat', label: 'Playground', hint: 'Text & images', icon: MessageCircleMore },
@@ -452,7 +465,20 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
       <div className="avatar">{message.role === 'user' ? 'YOU' : <Sparkles size={16} />}</div>
       <div className="message-body">
         <span className="message-author">{message.role === 'user' ? 'You' : 'LocalLLM'}<small>{message.role === 'assistant' ? message.model ?? fallbackModel : 'saved turn'}</small>{message.mode && <i>{CHAT_MODES.find((item) => item.id === message.mode)?.shortLabel}</i>}</span>
-        {message.image && <img src={message.image} alt="User attachment" />}
+        {message.images?.length
+          ? <div
+              className="message-images"
+              aria-label={`${message.images.length} user image attachment${message.images.length === 1 ? '' : 's'}`}
+            >
+              {message.images.map((image, index) => (
+                <img
+                  key={`${message.id}-image-${index}`}
+                  src={image}
+                  alt={`User attachment ${index + 1} of ${message.images!.length}`}
+                />
+              ))}
+            </div>
+          : null}
         {message.activity && message.pending && <div className="agent-activity" role="status" aria-live="polite">{message.activity.map((item, index) => <span key={item} className={index === message.activity!.length - 1 ? 'is-current' : ''}>{index === message.activity!.length - 1 ? <LoaderCircle className="spin" size={12} /> : <Check size={12} />}{item}</span>)}</div>}
         {message.pending && !message.content ? <div className="typing" aria-label="Local model is responding"><i /><i /><i /></div> : <SafeModelMarkdown>{message.content}</SafeModelMarkdown>}
         {message.warning && <div className="message-warning"><Activity size={13} />{message.warning}</div>}
@@ -490,7 +516,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const [visionModel, setVisionModel] = useState('localllm-vision')
   const [input, setInput] = useState(initialPrompt ?? '')
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [image, setImage] = useState<string | undefined>()
+  const [images, setImages] = useState<string[]>([])
   const [mode, setMode] = useState<ChatMode>('auto')
   const [searchStatus, setSearchStatus] = useState<SearchStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -537,7 +563,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
   const activeAgentTaskRef = useRef<ActiveAgentTask | null>(null)
   const textModel = chooseAvailableAlias(catalog, model, 'text')
   const availableVisionModel = chooseAvailableAlias(catalog, visionModel, 'vision')
-  const hasImageContext = Boolean(image || hasInferenceImage(messages, summarizedMessageCount))
+  const hasImageContext = Boolean(images.length || hasInferenceImage(messages, summarizedMessageCount))
   const activeModel = hasImageContext ? availableVisionModel : textModel
   const capabilityBusy = agentBusy || imageGenerationBusy || agentDispatching || Boolean(agentPlanRequest)
   const threadMode = messages.length ? messages[messages.length - 1].mode ?? mode : mode
@@ -622,7 +648,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     setSummarizedMessageCount(conversation.summarized_message_count)
     setSummaryMethod(conversation.summary_method)
     if (!options.preserveComposer) {
-      setImage(undefined)
+      setImages([])
       setInput('')
     }
     setError('')
@@ -827,7 +853,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     setSummarizedMessageCount(0)
     setSummaryMethod(null)
     setMode('auto')
-    setImage(undefined)
+    setImages([])
     setInput('')
     setError('')
     setRenaming(false)
@@ -966,10 +992,10 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
 
   const send = useCallback(async () => {
     const draft = input
-    const attachment = image
+    const attachments = [...images]
     const text = draft.trim()
     if (
-      (!text && !image)
+      (!text && !attachments.length)
       || !activeModel
       || capabilityBusy
       || agentDispatchGateRef.current
@@ -983,7 +1009,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       return
     }
     const explicitAgentIntent = shouldAutoRouteAgent(text)
-    if (agentRoutingEnabled && !attachment && explicitAgentIntent) {
+    if (agentRoutingEnabled && !attachments.length && explicitAgentIntent) {
       if (text.length > MAX_AGENT_GOAL_CHARS) {
         setError(`Agent execution requests are limited to ${MAX_AGENT_GOAL_CHARS.toLocaleString()} characters. Shorten this task before sending it.`)
         window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
@@ -1004,7 +1030,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
           {
             messages: persistedTranscriptRef.current,
             draft,
-            attachment,
+            attachments,
           },
           () => persistMessages(next, activeModel, mode),
         )
@@ -1013,7 +1039,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
           followTranscriptRef.current = true
           setMessages(initialSave.rollback.messages)
           setInput(initialSave.rollback.draft)
-          setImage(initialSave.rollback.attachment)
+          setImages(initialSave.rollback.attachments)
           setSessionStatus(conversationIdRef.current ? 'saved' : 'new')
           const failure = initialSave.reason instanceof Error
             ? initialSave.reason.message
@@ -1042,7 +1068,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       } catch (reason) {
         setMessages(persistedTranscriptRef.current)
         setInput(draft)
-        setImage(attachment)
+        setImages(attachments)
         setError(reason instanceof Error ? reason.message : 'This Agent request could not be saved.')
       } finally {
         setAgentDispatching(false)
@@ -1054,7 +1080,13 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     }
     const generation = beginRequest(requestLifecycleRef.current)
     if (generation === null) return
-    const user: ChatMessage = { id: uid(), role: 'user', content: text || 'Describe this image.', image, mode }
+    const user: ChatMessage = {
+      id: uid(),
+      role: 'user',
+      content: text || (attachments.length === 1 ? 'Describe this image.' : 'Describe these images.'),
+      images: attachments,
+      mode,
+    }
     const assistantId = uid()
     const next = [...messages, user]
     const initialActivity = mode === 'local'
@@ -1075,7 +1107,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     followTranscriptRef.current = true
     setMessages([...next, assistantDraft])
     setInput('')
-    setImage(undefined)
+    setImages([])
     setBusy(true)
     setError('')
     const controller = new AbortController()
@@ -1101,7 +1133,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
         {
           messages: persistedTranscriptRef.current,
           draft,
-          attachment,
+          attachments,
         },
         () => persistMessages(next, activeModel, mode),
       )
@@ -1111,12 +1143,12 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
           followTranscriptRef.current = true
           setMessages(initialSave.rollback.messages)
           setInput(initialSave.rollback.draft)
-          setImage(initialSave.rollback.attachment)
+          setImages(initialSave.rollback.attachments)
           setSessionStatus(conversationIdRef.current ? 'saved' : 'new')
           const failure = initialSave.reason instanceof Error
             ? initialSave.reason.message
             : 'This turn could not be saved.'
-          setError(`${failure} Nothing was added to the chat; your exact draft${initialSave.rollback.attachment ? ' and attachment were' : ' was'} restored.`)
+          setError(`${failure} Nothing was added to the chat; your exact draft${initialSave.rollback.attachments.length ? ' and attachments were' : ' was'} restored.`)
           window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
         }
         return
@@ -1207,25 +1239,35 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     agentRoutingEnabled,
     capabilityBusy,
     compactCurrent,
-    image,
+    images,
     input,
     messages,
     mode,
     persistMessages,
   ])
 
-  const attach = async (file?: File) => {
+  const attach = async (selectedFiles: File[]) => {
     if (capabilityBusy || sessionBusyRef.current || compactionRef.current) return
-    const validation = imageFileError(file)
+    const validation = imageSelectionError(images, selectedFiles)
     if (validation) { setError(validation); return }
     const fileReadGeneration = ++fileReadGenerationRef.current
+    markSessionBusy(true)
     try {
-      const dataUrl = await fileToDataUrl(file!)
+      const dataUrls: string[] = []
+      for (const file of selectedFiles) {
+        dataUrls.push(await fileToCanonicalImageDataUrl(file))
+        const canonicalError = canonicalImageSelectionError([...images, ...dataUrls])
+        if (canonicalError) throw new Error(canonicalError)
+      }
       if (fileReadGenerationRef.current !== fileReadGeneration) return
-      setImage(dataUrl)
+      setImages((current) => [...current, ...dataUrls])
       setError('')
-    } catch {
-      if (fileReadGenerationRef.current === fileReadGeneration) setError('The selected image could not be read.')
+    } catch (reason) {
+      if (fileReadGenerationRef.current === fileReadGeneration) {
+        setError(reason instanceof Error ? reason.message : 'The selected images could not be read.')
+      }
+    } finally {
+      markSessionBusy(false)
     }
   }
 
@@ -1265,7 +1307,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
         id: uid(),
         role: 'user',
         content: taskGoal,
-        image,
+        images: [...images],
         mode,
       }
       next = [...messages, user, assistant]
@@ -1277,13 +1319,13 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       await persistMessages(next, selectedModel, selectedMode)
       setMessages(next)
       setInput('Explain the isolated result and continue this task.')
-      setImage(undefined)
+      setImages([])
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : 'The Agent result could not be saved.'
       setError(message)
       throw new Error(message)
     }
-  }, [activeModel, busy, image, imageGenerationBusy, messages, mode, model, persistMessages])
+  }, [activeModel, busy, imageGenerationBusy, images, messages, mode, model, persistMessages])
 
   const useGeneratedImage = useCallback(async (blob: Blob, prompt: string) => {
     if (busy || sessionBusyRef.current || compactionRef.current || agentBusy) {
@@ -1297,8 +1339,12 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       const generated = new File([blob], `localllm-generated.${extension}`, { type: blob.type })
       const validation = imageFileError(generated)
       if (validation) throw new Error(`${validation} Download it from Image Studio instead.`)
-      const dataUrl = await fileToDataUrl(generated)
-      setImage(dataUrl)
+      const selectionError = imageSelectionError(images, [generated])
+      if (selectionError) throw new Error(`${selectionError} Download it from Image Studio instead.`)
+      const dataUrl = await fileToCanonicalImageDataUrl(generated)
+      const canonicalError = canonicalImageSelectionError([...images, dataUrl])
+      if (canonicalError) throw new Error(`${canonicalError} Download it from Image Studio instead.`)
+      setImages((current) => [...current, dataUrl])
       setInput(prompt
         ? `Continue working with this locally generated image. Original prompt: ${prompt}`
         : 'Continue working with this locally generated image.')
@@ -1307,7 +1353,7 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
     } finally {
       markSessionBusy(false)
     }
-  }, [agentBusy, busy, markSessionBusy])
+  }, [agentBusy, busy, images, markSessionBusy])
 
   const sessionStatusLabel = sessionStatus === 'loading' ? 'Loading chats'
     : sessionStatus === 'saving' ? 'Saving to SQLite'
@@ -1406,12 +1452,32 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
       </div>
       <div className="composer-wrap">
         {error && <div className="inline-error" role="alert"><Activity size={15} />{error}</div>}
-        {image && <div className="attachment-preview" role="status"><img src={image} alt="Ready to send" /><span>Image ready · vision routing enabled</span><button onClick={() => setImage(undefined)} aria-label="Remove attached image"><X size={15} /></button></div>}
+        {images.length
+          ? <div
+              className="attachment-preview"
+              role="status"
+              aria-label={`${images.length} image attachment${images.length === 1 ? '' : 's'} ready`}
+            >
+              {images.map((image, index) => (
+                <div className="attachment-preview-item" key={`composer-image-${index}`}>
+                  <img src={image} alt={`Ready to send ${index + 1} of ${images.length}`} />
+                  <button
+                    type="button"
+                    onClick={() => setImages((current) => removeImageAt(current, index))}
+                    aria-label={`Remove attached image ${index + 1}`}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              ))}
+              <span>{images.length} image{images.length === 1 ? '' : 's'} ready · vision routing enabled</span>
+            </div>
+          : null}
         <div className="capability-dock" aria-label="Optional local capabilities">
           <AgentPanel
             goal={input}
             model={activeModel || model}
-            hasImage={Boolean(image)}
+            hasImage={images.length > 0}
             contextKey={conversationId ?? 'new'}
             routingEnabled={agentRoutingEnabled}
             autoRequest={agentPlanRequest}
@@ -1437,10 +1503,26 @@ function ChatView({ catalog, initialPrompt }: { catalog: CatalogResponse | null;
               {hasImageContext
                 ? <ModelSelect model={visionModel} setModel={setVisionModel} catalog={catalog} kind="vision" testId="chat-vision-model-select" disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} />
                 : <ModelSelect model={model} setModel={setModel} catalog={catalog} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} />}
-              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const inputElement = event.currentTarget; void attach(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
-              <button className="tool-button" onClick={() => fileRef.current?.click()} disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting'} aria-label="Attach an image"><Paperclip size={16} /><span>Image</span></button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.png,.jpg,.jpeg,.webp,.heic,.heif"
+                multiple
+                hidden
+                onChange={(event) => {
+                  const inputElement = event.currentTarget
+                  void attach(Array.from(inputElement.files ?? []))
+                    .finally(() => { inputElement.value = '' })
+                }}
+              />
+              <button
+                className="tool-button"
+                onClick={() => fileRef.current?.click()}
+                disabled={busy || sessionBusy || capabilityBusy || sessionStatus === 'compacting' || images.length >= 4}
+                aria-label="Attach images"
+              ><Paperclip size={16} /><span>Images</span></button>
             </div>
-            {busy ? <button aria-label="Stop response" data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button aria-label="Send message" data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !image) || !activeModel || sessionBusy || capabilityBusy || ['loading', 'compacting'].includes(sessionStatus)}><Send size={18} /></button>}
+            {busy ? <button aria-label="Stop response" data-testid="chat-send" data-status="running" className="send-button stop" onClick={() => abortRef.current?.abort()}><CircleStop size={18} /></button> : <button aria-label="Send message" data-testid="chat-send" data-status="ready" className="send-button" onClick={() => void send()} disabled={(!input.trim() && !images.length) || !activeModel || sessionBusy || capabilityBusy || ['loading', 'compacting'].includes(sessionStatus)}><Send size={18} /></button>}
           </div>
         </div>
         {!activeModel
@@ -1491,11 +1573,13 @@ function VisionView({ catalog }: { catalog: CatalogResponse | null }) {
       setImage(undefined)
       setAnswer('')
       setError('')
-      const dataUrl = await fileToDataUrl(file!)
+      const dataUrl = await fileToCanonicalImageDataUrl(file!)
       if (fileReadGenerationRef.current !== fileReadGeneration) return
       setImage(dataUrl)
-    } catch {
-      if (fileReadGenerationRef.current === fileReadGeneration) setError('The selected image could not be read.')
+    } catch (reason) {
+      if (fileReadGenerationRef.current === fileReadGeneration) {
+        setError(reason instanceof Error ? reason.message : 'The selected image could not be read.')
+      }
     }
   }
   const analyze = async () => {
@@ -1505,7 +1589,7 @@ function VisionView({ catalog }: { catalog: CatalogResponse | null }) {
     setAnswer('')
     setBusy(true)
     setError('')
-    const message: ChatMessage = { id: uid(), role: 'user', content: prompt, image }
+    const message: ChatMessage = { id: uid(), role: 'user', content: prompt, images: [image] }
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -1532,8 +1616,8 @@ function VisionView({ catalog }: { catalog: CatalogResponse | null }) {
       <HeroTitle eyebrow="MULTIMODAL WORKBENCH" title="See more." accent="Send nothing." copy="Inspect screenshots, diagrams, documents, hardware photos, and visual bugs with a vision model that stays on your GPUs." />
       <div className="vision-layout">
         <label className={`dropzone ${image ? 'has-image' : ''} ${drag ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDrag(true) }} onDragLeave={() => setDrag(false)} onDrop={(event) => { event.preventDefault(); setDrag(false); void chooseFile(event.dataTransfer.files[0]) }}>
-          <input type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const inputElement = event.currentTarget; void chooseFile(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
-          {image ? <><img src={image} alt="Vision input" /><span className="replace-image"><RefreshCw size={15} /> Replace image</span></> : <div className="dropzone-empty"><div><ImagePlus size={28} /></div><strong>Drop an image into the lab</strong><p>PNG, JPEG, WebP · up to 8 MB</p><span>CHOOSE IMAGE</span></div>}
+          <input type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.png,.jpg,.jpeg,.webp,.heic,.heif" hidden onChange={(event) => { const inputElement = event.currentTarget; void chooseFile(inputElement.files?.[0]).finally(() => { inputElement.value = '' }) }} />
+          {image ? <><img src={image} alt="Vision input" /><span className="replace-image"><RefreshCw size={15} /> Replace image</span></> : <div className="dropzone-empty"><div><ImagePlus size={28} /></div><strong>Drop an image into the lab</strong><p>PNG, JPEG, WebP · HEIC/HEIF with native browser decode</p><span>CHOOSE IMAGE</span></div>}
         </label>
         <div className="vision-panel">
           <div className="panel-kicker"><Aperture size={17} /><span>INSPECTION BRIEF</span></div>

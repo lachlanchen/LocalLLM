@@ -5,7 +5,7 @@ export const AUTO_COMPACT_UNSUMMARIZED_MESSAGES = 20
 export const MAX_INFERENCE_MESSAGES = 40
 export const MAX_INFERENCE_TEXT_BYTES = 30_000
 export const MAX_INFERENCE_IMAGES = 4
-export const MAX_INFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
+export const MAX_INFERENCE_IMAGE_BYTES = 16 * 1024 * 1024
 export const MAX_CHAT_INPUT_CHARS = 32_000
 export const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 96
 const IMAGE_CONTEXT_RESERVE_BYTES = 4_096
@@ -80,7 +80,7 @@ export function chatInputError(value: string): string | null {
 export interface PreInferenceRollback {
   messages: ChatMessage[]
   draft: string
-  attachment?: string
+  attachments: string[]
 }
 
 export async function persistDraftBeforeInference<T>(
@@ -103,7 +103,7 @@ export function hasInferenceImage(
 ): boolean {
   const start = Math.max(summarizedMessageCount, messages.length - MAX_INFERENCE_MESSAGES)
   for (let index = messages.length - 1; index >= start; index -= 1) {
-    if (messages[index].image) return true
+    if (messages[index].images?.length) return true
   }
   return false
 }
@@ -111,18 +111,23 @@ export function hasInferenceImage(
 export function conversationTitle(messages: ChatMessage[]): string {
   const firstUser = messages.find((message) => message.role === 'user')
   const text = firstUser?.content.replace(/\s+/g, ' ').trim()
-  if (!text) return firstUser?.image ? 'Image conversation' : 'New conversation'
+  if (!text) return firstUser?.images?.length ? 'Image conversation' : 'New conversation'
   return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text
+}
+
+export function removeImageAt(images: string[], index: number): string[] {
+  if (!Number.isInteger(index) || index < 0 || index >= images.length) return [...images]
+  return images.filter((_, currentIndex) => currentIndex !== index)
 }
 
 export function storedMessages(messages: ChatMessage[]): ConversationMessage[] {
   return messages
-    .filter((message) => !message.pending && Boolean(message.content.trim() || message.image))
+    .filter((message) => !message.pending && Boolean(message.content.trim() || message.images?.length))
     .map((message) => ({
       id: message.id,
       role: message.role,
       content: message.content,
-      ...(message.image ? { image: message.image } : {}),
+      ...(message.images?.length ? { images: [...message.images] } : {}),
       ...(message.model ? { model: message.model } : {}),
       ...(message.mode ? { mode: message.mode } : {}),
       ...(message.sources?.length ? { sources: message.sources } : {}),
@@ -131,10 +136,15 @@ export function storedMessages(messages: ChatMessage[]): ConversationMessage[] {
 }
 
 export function restoredMessages(messages: ConversationMessage[]): ChatMessage[] {
-  return messages.map((message, index) => ({
-    ...message,
-    id: message.id || `stored-${index}`,
-  }))
+  return messages.map((message, index) => {
+    const { image, images, ...rest } = message
+    const restoredImages = images?.length ? [...images] : image ? [image] : []
+    return {
+      ...rest,
+      id: message.id || `stored-${index}`,
+      ...(restoredImages.length ? { images: restoredImages } : {}),
+    }
+  })
 }
 
 export function inferenceContext(
@@ -146,18 +156,23 @@ export function inferenceContext(
   let imageCount = 0
   let imageBytes = 0
   const imageBound = [...unsummarized].reverse().map((message, reverseIndex) => {
-    if (!message.image) return message
-    const bytes = decodedDataUrlBytes(message.image)
-    if (imageCount < MAX_INFERENCE_IMAGES && imageBytes + bytes <= MAX_INFERENCE_IMAGE_BYTES) {
+    if (!message.images?.length) return message
+    const retainedImages: string[] = []
+    for (const image of message.images) {
+      const bytes = decodedDataUrlBytes(image)
+      if (imageCount >= MAX_INFERENCE_IMAGES || imageBytes + bytes > MAX_INFERENCE_IMAGE_BYTES) {
+        continue
+      }
       imageCount += 1
       imageBytes += bytes
-      return message
+      retainedImages.push(image)
     }
+    if (retainedImages.length === message.images.length) return message
     return {
       ...message,
       id: `${message.id}-context-${reverseIndex}`,
-      image: undefined,
-      content: `${message.content}\n\n[An older image attachment is preserved in local history but omitted from this inference context.]`,
+      images: retainedImages.length ? retainedImages : undefined,
+      content: `${message.content}\n\n[Older image attachments are preserved in local history but omitted from this inference context.]`,
     }
   }).reverse()
   const textBudget = Math.max(8_192, MAX_INFERENCE_TEXT_BYTES - imageCount * IMAGE_CONTEXT_RESERVE_BYTES)

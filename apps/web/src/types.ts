@@ -46,7 +46,7 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
-  image?: string
+  images?: string[]
   pending?: boolean
   model?: string
   mode?: ChatMode
@@ -59,6 +59,8 @@ export interface ConversationMessage {
   id?: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  images?: string[]
+  /** Read-only compatibility for conversations saved before ordered attachments. */
   image?: string
   model?: string
   mode?: ChatMode

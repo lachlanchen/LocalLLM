@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, imageFileError, pullModel, streamAgentChat, streamChat } from './api'
+import {
+  api,
+  pullModel,
+  streamAgentChat,
+  streamChat,
+} from './api'
 import type { ChatMessage, McpStatus } from './types'
 
 afterEach(() => {
@@ -48,15 +53,6 @@ describe('local reverse-engineering API client', () => {
       body: JSON.stringify({ expected_revision: 17 }),
       signal: controller.signal,
     })
-  })
-
-  it('rejects unsafe or oversized image attachments before reading them', () => {
-    expect(imageFileError(new File(['x'], 'payload.svg', { type: 'image/svg+xml' }))).toContain('PNG')
-    expect(imageFileError(new File([], 'empty.png', { type: 'image/png' }))).toContain('empty')
-    const oversized = new File([new Uint8Array(8 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' })
-    expect(imageFileError(oversized)).toContain('8 MB')
-    expect(imageFileError(new File(['safe'], 'photo.webp', { type: 'image/webp' }))).toBeNull()
-    expect(imageFileError(new File(['animated'], 'animation.gif', { type: 'image/gif' }))).toContain('PNG')
   })
 
   it('loads bridge status and project binaries', async () => {
@@ -296,7 +292,10 @@ describe('local reverse-engineering API client', () => {
       id: 'image-turn',
       role: 'user',
       content: 'Inspect and research this',
-      image: 'data:image/png;base64,AAAA',
+      images: [
+        'data:image/png;base64,AAAA',
+        'data:image/jpeg;base64,BBBB',
+      ],
     }]
 
     await streamAgentChat(messages, 'localllm-fast', 'all', {
@@ -314,6 +313,7 @@ describe('local reverse-engineering API client', () => {
         messages: [{ role: 'user', content: [
           { type: 'text', text: 'Inspect and research this' },
           { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+          { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,BBBB' } },
         ] }],
         model: 'localllm-fast',
         mode: 'all',
@@ -362,7 +362,7 @@ describe('local reverse-engineering API client', () => {
       id: 'vision-turn',
       role: 'user',
       content: 'Read this diagram',
-      image: 'data:image/webp;base64,AAAA',
+      images: ['data:image/webp;base64,AAAA'],
     }
     let answer = ''
     const controller = new AbortController()

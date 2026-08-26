@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sqlite3
 import struct
@@ -27,13 +28,16 @@ from localllm.conversations import (
 from localllm.main import app
 
 
-def png_data_url() -> str:
+def png_data_url(marker: bytes = b"") -> str:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         checksum = zlib.crc32(kind + payload).to_bytes(4, "big")
         return len(payload).to_bytes(4, "big") + kind + payload + checksum
 
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    payload = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+    metadata = chunk(b"tEXt", b"id=" + marker) if marker else b""
+    payload = (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + metadata + chunk(b"IEND", b"")
+    )
     return "data:image/png;base64," + base64.b64encode(payload).decode()
 
 
@@ -112,6 +116,8 @@ def test_sqlite_store_round_trips_ui_history_and_reopens(tmp_path: Path) -> None
     assert created["id"].startswith("conv_")
     assert created["title"].startswith("Preserve this Markdown")
     assert created["messages"][0]["content"] == "  Preserve this Markdown:\n\n    x = 1  "
+    assert created["messages"][0]["images"] == [png_data_url()]
+    assert "image" not in created["messages"][0]
     assert created["messages"][1]["sources"][0]["doi"] == "10.1234/example"
     assert created["messages"][1]["sources"][0]["index"] == 1
     assert created["messages"][1]["sources"][0]["provenance"][0]["provider_rank"] == 1
@@ -267,6 +273,64 @@ def test_message_schema_rejects_transient_ui_state_and_unsafe_image() -> None:
         )
 
 
+def test_legacy_image_records_are_read_as_ordered_images_without_rewriting_sqlite(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path)
+    created = store.create(ConversationCreate(messages=[{"role": "user", "content": "old"}]))
+    legacy_image = png_data_url(b"legacy")
+    legacy_messages = json.dumps(
+        [{"id": "legacy", "role": "user", "content": "old", "image": legacy_image}],
+        separators=(",", ":"),
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE conversations SET messages_json = ? WHERE id = ?",
+            (legacy_messages, created["id"]),
+        )
+
+    restored = store.get(created["id"])
+
+    assert restored is not None
+    assert restored["messages"][0]["images"] == [legacy_image]
+    assert "image" not in restored["messages"][0]
+    with sqlite3.connect(store.path) as connection:
+        raw_messages = connection.execute(
+            "SELECT messages_json FROM conversations WHERE id = ?", (created["id"],)
+        ).fetchone()[0]
+    assert json.loads(raw_messages)[0]["image"] == legacy_image
+    assert "images" not in json.loads(raw_messages)[0]
+
+
+def test_message_images_preserve_order_and_enforce_grounded_request_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ordered = [png_data_url(str(index).encode()) for index in range(4)]
+    message = ConversationMessage.model_validate(
+        {"role": "user", "content": "compare", "images": ordered}
+    )
+
+    assert message.images == ordered
+    store = make_store(tmp_path)
+    created = store.create(ConversationCreate(messages=[message]))
+    assert created["messages"][0]["images"] == ordered
+    with pytest.raises(ValidationError, match="too_long"):
+        ConversationMessage.model_validate(
+            {"role": "user", "content": "too many", "images": ordered + [png_data_url(b"5")]}
+        )
+
+    monkeypatch.setattr(
+        conversation_module,
+        "_decode_data_image",
+        lambda _image: b"x" * (6 * 1024 * 1024),
+    )
+    with pytest.raises(ValidationError, match="total decoded-size limit"):
+        ConversationMessage.model_validate(
+            {"role": "user", "content": "too large together", "images": ["a", "b", "c"]}
+        )
+
+
 def test_long_conversation_allows_four_hundred_bounded_messages() -> None:
     accepted = ConversationCreate(messages=messages(MAX_CONVERSATION_MESSAGES))
     assert len(accepted.messages) == MAX_CONVERSATION_MESSAGES
@@ -281,7 +345,7 @@ def test_durable_history_accepts_more_images_than_one_inference_request() -> Non
                 "id": f"image_{index}",
                 "role": "user",
                 "content": f"image turn {index}",
-                "image": png_data_url(),
+                "images": [png_data_url()],
             }
             for index in range(5)
         ]

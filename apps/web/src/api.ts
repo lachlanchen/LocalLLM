@@ -23,8 +23,6 @@ import type {
 } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
-export const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
-const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 export class ApiError extends Error {
   status: number
@@ -246,15 +244,18 @@ export async function streamChat(
 function toOpenAiMessages(messages: ChatMessage[]) {
   return messages
     .filter((message) => !message.pending)
-    .map((message) => ({
-      role: message.role,
-      content: message.image
-        ? [
-            { type: 'text', text: message.content },
-            { type: 'image_url', image_url: { url: message.image } },
-          ]
-        : message.content,
-    }))
+    .map((message) => {
+      const images = message.images ?? []
+      return {
+        role: message.role,
+        content: images.length
+          ? [
+              { type: 'text', text: message.content },
+              ...images.map((image) => ({ type: 'image_url', image_url: { url: image } })),
+            ]
+          : message.content,
+      }
+    })
 }
 
 export interface AgentChatHandlers {
@@ -394,23 +395,6 @@ export async function pullModel(
   } finally {
     await cleanupStreamReader(reader, !endedNaturally)
   }
-}
-
-export function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
-export function imageFileError(file?: File): string | null {
-  if (!file) return 'Choose an image to continue.'
-  if (!SUPPORTED_IMAGE_TYPES.has(file.type)) return 'Use a PNG, JPEG, or WebP image.'
-  if (file.size <= 0) return 'The selected image is empty.'
-  if (file.size > MAX_IMAGE_UPLOAD_BYTES) return 'Images must be 8 MB or smaller.'
-  return null
 }
 
 export function formatBytes(bytes: number): string {
