@@ -54,6 +54,37 @@ FAKE_NVIDIA_SMI_MODE=success-two \
   LOCALLLM_GPU_READY_INTERVAL_SECONDS=0 \
   bash "$project_root/scripts/wait-for-gpus.sh" >/dev/null
 
+FAKE_NVIDIA_SMI_MODE=success-two \
+  LOCALLLM_EXPECTED_GPU_COUNT=1 \
+  LOCALLLM_GPU_READY_ATTEMPTS=1 \
+  LOCALLLM_GPU_READY_INTERVAL_SECONDS=0 \
+  LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES=1 \
+  CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  CUDA_VISIBLE_DEVICES=1 \
+  bash "$project_root/scripts/wait-for-gpus.sh" >/dev/null
+
+if FAKE_NVIDIA_SMI_MODE=success-two \
+  LOCALLLM_EXPECTED_GPU_COUNT=1 \
+  LOCALLLM_GPU_READY_ATTEMPTS=1 \
+  LOCALLLM_GPU_READY_INTERVAL_SECONDS=0 \
+  LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES=3 \
+  CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  CUDA_VISIBLE_DEVICES=3 \
+  bash "$project_root/scripts/wait-for-gpus.sh" >/dev/null 2>&1; then
+  fail "an unavailable selected GPU index was accepted"
+fi
+
+if FAKE_NVIDIA_SMI_MODE=success-two \
+  LOCALLLM_EXPECTED_GPU_COUNT=1 \
+  LOCALLLM_GPU_READY_ATTEMPTS=1 \
+  LOCALLLM_GPU_READY_INTERVAL_SECONDS=0 \
+  LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES=1 \
+  CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  CUDA_VISIBLE_DEVICES=0 \
+  bash "$project_root/scripts/wait-for-gpus.sh" >/dev/null 2>&1; then
+  fail "a CUDA_VISIBLE_DEVICES mismatch was accepted"
+fi
+
 if FAKE_NVIDIA_SMI_MODE=partial-failure \
   LOCALLLM_EXPECTED_GPU_COUNT=2 \
   LOCALLLM_GPU_READY_ATTEMPTS=1 \

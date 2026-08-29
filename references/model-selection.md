@@ -79,6 +79,14 @@ disagrees. Keep the value at `0` on CPU-only or variable-GPU systems. Placement
 is not a performance guarantee: benchmark single- and two-card modes on the
 actual PCIe topology.
 
+To reserve one card for another workload, set a deterministic Ollama visibility
+list. For example, `LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES=1` together with
+`LOCALLLM_EXPECTED_GPU_COUNT=1` exposes only physical GPU 1 to Ollama. The
+installer validates the index list, renders `CUDA_DEVICE_ORDER=PCI_BUS_ID` and
+`CUDA_VISIBLE_DEVICES=1` into the Ollama unit, disables Ollama's Vulkan fallback
+so a CUDA-hidden NVIDIA card cannot be rediscovered, and rejects a count
+mismatch. Leave the setting empty to preserve normal all-GPU discovery.
+
 ## Why no 70B default
 
 A dense 70B Q4 model can be made to fit near the total 48 GB budget, but leaves less headroom for cache and concurrency, crosses PCIe every generation step, and does not serve the fast daily/vision split as well. It remains an optional specialist rather than the base installation.

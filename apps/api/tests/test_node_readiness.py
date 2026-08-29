@@ -337,3 +337,19 @@ def test_service_installer_uses_truthful_readiness_probe() -> None:
 
     assert '"LocalLLM API" "http://127.0.0.1:8008/readyz"' in installer
     assert "http://127.0.0.1:8008/healthz" not in installer
+
+
+def test_service_installer_supports_validated_ollama_gpu_isolation() -> None:
+    root = Path(__file__).parents[3]
+    installer = (root / "scripts" / "install-user-services.sh").read_text()
+    unit = (root / "deploy" / "systemd" / "localllm-ollama.service.in").read_text()
+
+    assert "LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES" in installer
+    assert "contains duplicate GPU index" in installer
+    assert "must equal the number of selected Ollama GPUs" in installer
+    assert "ollama_vulkan_env='Environment=OLLAMA_VULKAN=0'" in installer
+    assert "discovered_count == expected_gpu_count" in installer
+    assert "nvidia-smi --query-gpu=index,pci.bus_id" in installer
+    assert "@OLLAMA_CUDA_VISIBLE_DEVICES_ENV@" in unit
+    assert "@LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES_ENV@" in unit
+    assert "@OLLAMA_VULKAN_ENV@" in unit
