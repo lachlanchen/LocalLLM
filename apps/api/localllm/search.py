@@ -316,6 +316,49 @@ def _canonical_url(url: str) -> str:
     return canonical if len(canonical) <= MAX_SOURCE_URL_CHARS else ""
 
 
+_SITE_OPERATOR_RE = re.compile(
+    r"(?<![\w-])site:([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)\.?(?=$|[\s,;!?)}\]\"'])",
+    flags=re.IGNORECASE,
+)
+
+
+def _query_site_hosts(query: str) -> tuple[str, ...]:
+    """Return valid positive ``site:`` host constraints without broadening them.
+
+    Providers differ in whether they understand search operators. Enforcing the
+    operator again after federation prevents an unrelated high-prior connector
+    from outranking the domain the caller explicitly requested.
+    """
+
+    hosts: list[str] = []
+    for match in _SITE_OPERATOR_RE.finditer(query[:800]):
+        hostname = match.group(1).casefold().rstrip(".")
+        labels = hostname.split(".")
+        if (
+            not hostname
+            or len(hostname) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or re.fullmatch(r"[a-z0-9-]+", label) is None
+                for label in labels
+            )
+        ):
+            continue
+        if hostname not in hosts:
+            hosts.append(hostname)
+    return tuple(hosts)
+
+
+def _matches_query_site(source: ResearchSource, hosts: tuple[str, ...]) -> bool:
+    if not hosts:
+        return True
+    hostname = (urlparse(source.url).hostname or "").casefold().rstrip(".")
+    return any(hostname == host or hostname.endswith(f".{host}") for host in hosts)
+
+
 def _source(
     *,
     provider: str,
@@ -1400,9 +1443,10 @@ class FederatedSearch:
 
     @staticmethod
     def _rank(query: str, sources: list[ResearchSource]) -> list[ResearchSource]:
+        lexical_query = _SITE_OPERATOR_RE.sub(" ", query)
         terms = {
             term
-            for term in re.findall(r"[\w-]{3,}", query.casefold(), flags=re.UNICODE)
+            for term in re.findall(r"[\w-]{3,}", lexical_query.casefold(), flags=re.UNICODE)
             if term not in {"what", "when", "where", "which", "with", "from", "that", "this"}
         }
         current_year = datetime.now(timezone.utc).year
@@ -1513,6 +1557,11 @@ class FederatedSearch:
             candidates: list[ResearchSource],
         ) -> list[ResearchSource]:
             deduplicated = self._deduplicate(candidates)
+            site_hosts = _query_site_hosts(query)
+            if site_hosts:
+                deduplicated = [
+                    source for source in deduplicated if _matches_query_site(source, site_hosts)
+                ]
             candidate_limit = max(24, min(90, limit * 3))
             candidates_to_validate = self._select_diverse(
                 self._rank(query, deduplicated), mode, candidate_limit

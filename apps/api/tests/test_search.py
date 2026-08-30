@@ -25,8 +25,10 @@ from localllm.search import (
     _bounded_records,
     _canonical_url,
     _load_bounded_json,
+    _matches_query_site,
     _normalise_doi,
     _plain_text,
+    _query_site_hosts,
     _source,
     _structured_keyword_query,
 )
@@ -153,6 +155,69 @@ def test_structured_query_removes_chat_formatting_instructions() -> None:
         == "large language model common use"
     )
     assert _structured_keyword_query("量子计算是什么？") == "量子计算是什么？"
+
+
+def test_positive_site_operator_is_exact_and_subdomain_aware() -> None:
+    hosts = _query_site_hosts(
+        "site:Docs.Python.org Python 3.14 site:python.org -site:untrusted.example"
+    )
+
+    assert hosts == ("docs.python.org", "python.org")
+    assert _matches_query_site(
+        source("Official", "https://docs.python.org/3/whatsnew/3.14.html", "test"), hosts
+    )
+    assert _matches_query_site(
+        source("Release", "https://www.python.org/downloads/release/python-3140/", "test"),
+        hosts,
+    )
+    assert not _matches_query_site(
+        source("Boundary attack", "https://notpython.org/result", "test"), hosts
+    )
+    assert not _matches_query_site(
+        source("Suffix attack", "https://docs.python.org.evil.example/result", "test"), hosts
+    )
+
+
+@pytest.mark.asyncio
+async def test_federation_enforces_site_operator_ignored_by_provider() -> None:
+    engine = FederatedSearch(settings())
+    provider = FakeProvider(
+        "web_test",
+        "web",
+        [
+            source(
+                "Unrelated high-prior result",
+                "https://news.example/unrelated",
+                "hacker_news_algolia",
+            ),
+            source(
+                "What's new in Python 3.14",
+                "https://docs.python.org/3/whatsnew/3.14.html",
+                "brave_html",
+            ),
+            source(
+                "Malicious hostname suffix",
+                "https://docs.python.org.evil.example/result",
+                "brave_html",
+            ),
+        ],
+    )
+    engine._general = [provider]
+    engine._keyless_web = []
+
+    async def public(_url: str) -> bool:
+        return True
+
+    outcome = await engine.search(
+        "site:docs.python.org Python 3.14 what is new",
+        "web",
+        4,
+        public_url_validator=public,
+    )
+
+    assert [item.url for item in outcome.sources] == [
+        "https://docs.python.org/3/whatsnew/3.14.html"
+    ]
 
 
 def test_deduplication_merges_academic_provenance_by_doi() -> None:
