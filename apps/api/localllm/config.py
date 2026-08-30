@@ -6,7 +6,7 @@ import re
 import stat
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -23,6 +23,106 @@ DEFAULT_REQUIRED_MODELS = (
 )
 DEFAULT_NODE_CANARY_ROLES = ("text", "vision", "embedding")
 _NODE_CANARY_ROLES = frozenset({"text", "code", "vision", "embedding"})
+_SEARCH_CREDENTIAL_NAME = "localllm-search-api-key"
+
+
+def _systemd_search_credential(path: Path) -> bool:
+    directory_value = os.environ.get("CREDENTIALS_DIRECTORY")
+    if directory_value is None:
+        return False
+    directory = Path(directory_value)
+    if not directory.is_absolute():
+        raise ValueError("Systemd credentials directory must be absolute")
+    expected = directory / _SEARCH_CREDENTIAL_NAME
+    if path.parent == directory and path != expected:
+        raise ValueError("Search API key must use the fixed systemd credential name")
+    return path == expected
+
+
+def _validate_search_key_metadata(entry: os.stat_result, *, systemd_managed: bool) -> None:
+    common_valid = stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1
+    owner_private = (
+        entry.st_uid == os.getuid()
+        and entry.st_gid == os.getgid()
+        and stat.S_IMODE(entry.st_mode) & 0o077 == 0
+    )
+    # A system service with User= materializes LoadCredential= as root:root 0440
+    # plus a service-user read ACL. This exact representation is acceptable only
+    # at the fixed path beneath the manager-supplied CREDENTIALS_DIRECTORY.
+    systemd_private = (
+        systemd_managed
+        and entry.st_uid == 0
+        and entry.st_gid == 0
+        and stat.S_IMODE(entry.st_mode) == 0o440
+    )
+    if not common_valid or not (owner_private or systemd_private):
+        raise ValueError(
+            "Search API key file must be one private regular file with an approved owner"
+        )
+
+
+def _read_private_search_key(path_value: object) -> SecretStr:
+    """Read one exact private search credential without following the final path."""
+
+    try:
+        path = Path(path_value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise ValueError("Search API key file must be an absolute private file") from exc
+    if not path.is_absolute():
+        raise ValueError("Search API key file must be an absolute private file")
+    systemd_managed = _systemd_search_credential(path)
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("Search API key file could not be opened safely") from exc
+    try:
+        entry = os.fstat(descriptor)
+        _validate_search_key_metadata(entry, systemd_managed=systemd_managed)
+        if entry.st_size < 1 or entry.st_size > 512:
+            raise ValueError("Search API key file must contain 1 to 512 bytes")
+        chunks: list[bytes] = []
+        size = 0
+        while size <= 512:
+            chunk = os.read(descriptor, min(513 - size, 513))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) < 1 or len(payload) > 512:
+            raise ValueError("Search API key file must contain 1 to 512 bytes")
+        after = os.fstat(descriptor)
+        before_identity = (
+            entry.st_dev,
+            entry.st_ino,
+            entry.st_mode,
+            entry.st_nlink,
+            entry.st_uid,
+            entry.st_gid,
+            entry.st_size,
+            entry.st_mtime_ns,
+            entry.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity or len(payload) != entry.st_size:
+            raise ValueError("Search API key file changed while it was being read")
+        if any(byte < 0x21 or byte > 0x7E for byte in payload):
+            raise ValueError("Search API key file must contain visible ASCII without whitespace")
+        return SecretStr(payload.decode("ascii"))
+    finally:
+        os.close(descriptor)
 
 
 def prepare_private_data_dir(path: Path) -> Path:
@@ -102,6 +202,11 @@ class Settings(BaseSettings):
     # the OpenAI-compatible API key and outbound provider credentials. Leaving this
     # empty preserves the original loopback-only local workflow.
     search_api_key: SecretStr = SecretStr("")
+    # Production services can keep the application credential in a systemd
+    # LoadCredential= file and pass only its path via LOCALLLM_SEARCH_API_KEY_FILE.
+    # Inline and file-backed values are mutually exclusive so precedence is never
+    # environment-order dependent.
+    search_api_key_file: Path | None = None
 
     # Search provider credentials are optional. Providers with no key remain available,
     # while configured providers are federated and their failures are reported per request.
@@ -185,6 +290,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def load_file_backed_search_api_key(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("search_api_key_file") is None:
+            return value
+        if "search_api_key" in value:
+            raise ValueError("Search API key and Search API key file are mutually exclusive")
+        loaded = dict(value)
+        loaded["search_api_key"] = _read_private_search_key(value["search_api_key_file"])
+        return loaded
+
     @field_validator("ollama_base_url")
     @classmethod
     def require_local_ollama(cls, value: str) -> str:
@@ -216,9 +332,7 @@ class Settings(BaseSettings):
             )
         search_api_key = self.search_api_key.get_secret_value()
         if search_api_key and search_api_key == self.api_key:
-            raise ValueError(
-                "Search API key must be distinct from the OpenAI-compatible API key"
-            )
+            raise ValueError("Search API key must be distinct from the OpenAI-compatible API key")
         if self.node_canary_receipt_path is not None:
             if not _IMMUTABLE_RELEASE_ID.fullmatch(self.release_id):
                 raise ValueError(
@@ -231,11 +345,7 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Node canary receipt must use the dedicated release-bound data path"
                 )
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
                 descriptor = os.open(expected_path.parent, flags)
             except OSError as exc:

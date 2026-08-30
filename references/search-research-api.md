@@ -10,8 +10,10 @@ These management routes use `http://127.0.0.1:8008/api/...`; they are separate
 from the OpenAI-compatible `/v1/*` surface. Search, Research, conversations,
 grounded Chat, and Agent routes do **not** consult `LOCALLLM_API_KEY`.
 `POST /api/search` instead supports its own application credential,
-`LOCALLLM_SEARCH_API_KEY`. When that value is configured, the route requires
-exactly one `Authorization: Bearer <search-key>` header. The scheme spelling,
+`LOCALLLM_SEARCH_API_KEY`, or the preferred file-backed
+`LOCALLLM_SEARCH_API_KEY_FILE`. The settings are mutually exclusive. When one
+is configured, the route requires exactly one
+`Authorization: Bearer <search-key>` header. The scheme spelling,
 single space, token, and header cardinality are exact; missing, duplicated,
 malformed, or wrong credentials return the same HTTP 401 response with
 `Cache-Control: no-store`. The key must use at most 512 visible ASCII characters
@@ -27,18 +29,22 @@ default-deny access-control layer. See
 [OpenAI API compatibility](openai-api-compatibility.md) for the complete gateway
 boundary.
 
-For a protected search worker, write a strong random value only into the
-owner-private production `.env` and the worker's separate upstream credential
-store:
+For a protected systemd search worker, keep the strong random value in a
+separate private credential source and expose only its runtime path to LocalLLM:
 
-```dotenv
-LOCALLLM_SEARCH_API_KEY=
+```systemd
+[Service]
+LoadCredential=localllm-search-api-key:/absolute/private/credential-source
+Environment=LOCALLLM_SEARCH_API_KEY_FILE=%d/localllm-search-api-key
 ```
 
-The blank line above is deliberately not a usable secret. Populate it privately,
-restart LocalLLM through the reviewed service workflow, and configure the worker
-to inject the same value in the Authorization header. Do not place the value in
-Git, manifests, unit arguments, logs, screenshots, or documentation.
+The application opens the final path with `O_NOFOLLOW`, requires one regular
+single-link file, binds a systemd-managed credential to that exact basename,
+accepts the host's exact private systemd materialization, and rejects empty,
+whitespace-containing, non-ASCII, or oversized values. An owner-private regular
+file may be used outside systemd. Configure the worker to inject the same value
+in the Authorization header. Do not place the value itself in Git, manifests,
+unit arguments, environment dumps, logs, screenshots, or documentation.
 
 ## Provider federation
 

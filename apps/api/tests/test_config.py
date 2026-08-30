@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import stat
+from types import SimpleNamespace
+
 import pytest
 
+from localllm import config as config_module
 from localllm.config import (
     DEFAULT_NODE_CANARY_ROLES,
     DEFAULT_REQUIRED_MODELS,
     Settings,
+    _validate_search_key_metadata,
     get_settings,
     prepare_private_data_dir,
 )
@@ -118,9 +123,7 @@ def test_canary_receipt_path_requires_immutable_release_bound_location(tmp_path)
 
 
 @pytest.mark.parametrize("release_id", ["dev", "unknown", "release-test"])
-def test_configured_canary_rejects_reusable_release_identity(
-    tmp_path, release_id: str
-) -> None:
+def test_configured_canary_rejects_reusable_release_identity(tmp_path, release_id: str) -> None:
     data_dir = tmp_path / "data"
     with pytest.raises(ValueError, match="immutable"):
         Settings(
@@ -232,6 +235,174 @@ def test_search_application_key_uses_dedicated_environment_variable_and_stays_ma
     assert secret not in settings.model_dump_json()
 
 
+def test_search_application_key_loads_from_one_private_absolute_file(monkeypatch, tmp_path) -> None:
+    secret = "file-backed-search-credential-0123456789"
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_text(secret, encoding="ascii")
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOCALLLM_SEARCH_API_KEY_FILE", str(credential))
+
+    settings = Settings(_env_file=None)
+
+    assert settings.search_api_key_file == credential
+    assert settings.search_api_key.get_secret_value() == secret
+    assert secret not in repr(settings)
+    assert secret not in settings.model_dump_json()
+
+
+def test_search_application_key_rejects_inline_and_file_ambiguity(monkeypatch, tmp_path) -> None:
+    inline_secret = "inline-search-credential-0123456789"
+    file_secret = "file-search-credential-0123456789"
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_text(file_secret, encoding="ascii")
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOCALLLM_SEARCH_API_KEY", inline_secret)
+    monkeypatch.setenv("LOCALLLM_SEARCH_API_KEY_FILE", str(credential))
+
+    with pytest.raises(ValueError, match="mutually exclusive") as exc_info:
+        Settings(_env_file=None)
+
+    assert inline_secret not in str(exc_info.value)
+    assert file_secret not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"", b"contains space", b"contains\nnewline", b"contains\x00nul", b"\xff", b"x" * 513],
+)
+def test_search_application_key_file_rejects_empty_oversized_or_ambiguous_bytes(
+    tmp_path, payload: bytes
+) -> None:
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_bytes(payload)
+    credential.chmod(0o600)
+
+    with pytest.raises(ValueError, match="Search API key file") as exc_info:
+        Settings(search_api_key_file=credential, _env_file=None)
+
+    decoded = payload.decode("ascii", errors="ignore")
+    if decoded:
+        assert decoded not in str(exc_info.value)
+
+
+def test_search_application_key_file_rejects_same_size_mutation_during_partial_read(
+    monkeypatch, tmp_path
+) -> None:
+    original_secret = b"original-private-search-credential-000000"
+    replacement = b"replacement-search-credential-private-000"
+    assert len(original_secret) == len(replacement)
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_bytes(original_secret)
+    credential.chmod(0o600)
+    original_read = config_module.os.read
+    calls = 0
+
+    def mutating_read(descriptor: int, size: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls != 1:
+            return original_read(descriptor, size)
+        chunk = original_read(descriptor, min(size, 8))
+        before = credential.stat()
+        with credential.open("r+b", buffering=0) as stream:
+            stream.write(replacement)
+        config_module.os.utime(
+            credential,
+            ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+        )
+        return chunk
+
+    monkeypatch.setattr(config_module.os, "read", mutating_read)
+
+    with pytest.raises(ValueError, match="changed while it was being read") as exc_info:
+        Settings(search_api_key_file=credential, _env_file=None)
+
+    assert calls >= 2
+    assert original_secret.decode("ascii") not in str(exc_info.value)
+    assert replacement.decode("ascii") not in str(exc_info.value)
+
+
+def test_search_application_key_file_rejects_relative_missing_or_non_private_paths(
+    tmp_path,
+) -> None:
+    with pytest.raises(ValueError, match="absolute private file"):
+        Settings(search_api_key_file="relative-key", _env_file=None)
+    with pytest.raises(ValueError, match="opened safely"):
+        Settings(search_api_key_file=tmp_path / "missing-key", _env_file=None)
+
+    permissive = tmp_path / "permissive-key"
+    permissive.write_text("private-search-key", encoding="ascii")
+    permissive.chmod(0o640)
+    with pytest.raises(ValueError, match="private regular file"):
+        Settings(search_api_key_file=permissive, _env_file=None)
+
+
+def test_search_application_key_file_rejects_symlinks_hardlinks_and_directories(
+    tmp_path,
+) -> None:
+    credential = tmp_path / "credential"
+    credential.write_text("private-search-key", encoding="ascii")
+    credential.chmod(0o600)
+
+    symlink = tmp_path / "credential-symlink"
+    symlink.symlink_to(credential)
+    with pytest.raises(ValueError, match="opened safely"):
+        Settings(search_api_key_file=symlink, _env_file=None)
+
+    hardlink = tmp_path / "credential-hardlink"
+    hardlink.hardlink_to(credential)
+    with pytest.raises(ValueError, match="private regular file"):
+        Settings(search_api_key_file=credential, _env_file=None)
+
+    directory = tmp_path / "credential-directory"
+    directory.mkdir(mode=0o700)
+    with pytest.raises(ValueError, match="private regular file"):
+        Settings(search_api_key_file=directory, _env_file=None)
+
+
+def test_search_application_key_file_binds_the_exact_systemd_credential_name(
+    monkeypatch, tmp_path
+) -> None:
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_text("systemd-search-key", encoding="ascii")
+    credential.chmod(0o400)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+
+    settings = Settings(search_api_key_file=credential, _env_file=None)
+
+    assert settings.search_api_key.get_secret_value() == "systemd-search-key"
+
+    wrong_name = tmp_path / "wrong-search-key"
+    wrong_name.write_text("other-private-key", encoding="ascii")
+    wrong_name.chmod(0o400)
+    with pytest.raises(ValueError, match="fixed systemd credential name"):
+        Settings(search_api_key_file=wrong_name, _env_file=None)
+
+
+def test_search_application_key_metadata_accepts_only_exact_systemd_root_shape() -> None:
+    approved = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o440,
+        st_nlink=1,
+        st_uid=0,
+        st_gid=0,
+    )
+    _validate_search_key_metadata(approved, systemd_managed=True)  # type: ignore[arg-type]
+
+    rejected = (
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o440, st_nlink=1, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_nlink=1, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_nlink=1, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o440, st_nlink=2, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o440, st_nlink=1, st_uid=0, st_gid=12345),
+    )
+    for offset, entry in enumerate(rejected):
+        with pytest.raises(ValueError, match="approved owner"):
+            _validate_search_key_metadata(
+                entry,  # type: ignore[arg-type]
+                systemd_managed=offset != 0,
+            )
+
+
 def test_search_application_key_must_not_reuse_openai_compatible_key() -> None:
     secret = "shared-credential"
     with pytest.raises(ValueError, match="must be distinct") as exc_info:
@@ -281,6 +452,7 @@ def test_image_generation_is_default_off_and_resource_settings_are_bounded() -> 
 def test_private_data_directory_does_not_follow_a_final_symlink(tmp_path) -> None:
     target = tmp_path / "unrelated"
     target.mkdir(mode=0o755)
+    target.chmod(0o755)
     link = tmp_path / "data"
     link.symlink_to(target, target_is_directory=True)
 

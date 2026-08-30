@@ -11,9 +11,11 @@ Authorization: Bearer local-dev-key
 mutation; only image-generation status remains loopback-public. Setting the key
 to an empty value disables both key checks. The shipped `local-dev-key` is an
 interoperability placeholder, not a secret. Other management `/api/*` routes do
-not consult this key. `POST /api/search` can instead require the independent
-`LOCALLLM_SEARCH_API_KEY`; that search-scoped token cannot authenticate `/v1`,
-and configuration rejects reuse of the `/v1` key. Every route relies on the
+not consult this key. `POST /api/search` can instead require an independent
+search-scoped token through `LOCALLLM_SEARCH_API_KEY`, or production can load
+the token through the mutually exclusive `LOCALLLM_SEARCH_API_KEY_FILE` systemd
+credential path. That token cannot authenticate `/v1`, and configuration
+rejects reuse of the `/v1` key. Every route relies on the
 loopback peer restriction; all browser requests to `/api/*` and `/v1/*`
 additionally receive `Origin`/`Sec-Fetch-Site` checks. A native process in the
 same host network namespace can invoke them. Do not proxy or tunnel port 8008

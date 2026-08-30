@@ -359,7 +359,10 @@ Rerun the installer after changing those settings.
 - App, Ollama, noVNC, and MCP examples bind to loopback; the app also rejects non-loopback peers if it is accidentally started on a broader socket.
 - `LOCALLLM_API_KEY` gates `/v1/*` plus every image job/output route and image
   mutation; only image status remains loopback-public. `POST /api/search` can
-  independently require `LOCALLLM_SEARCH_API_KEY`; when configured, only one
+  independently require either `LOCALLLM_SEARCH_API_KEY` or the preferred
+  file-backed `LOCALLLM_SEARCH_API_KEY_FILE`; the two settings are mutually
+  exclusive. A systemd service can bind the latter to a fixed
+  `LoadCredential=localllm-search-api-key:...` file. When configured, only one
   exact Bearer header carrying that distinct key is accepted. Other management
   `/api/*` routes—including conversations, research, and Agent
   planning/execution—rely on the loopback peer restriction; all browser

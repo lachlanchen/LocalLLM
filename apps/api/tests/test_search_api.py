@@ -100,6 +100,71 @@ def test_search_status_reports_auth_requirement_without_revealing_credential() -
     assert "set-cookie" not in response.headers
 
 
+def test_file_backed_search_key_enforces_the_complete_http_auth_contract(tmp_path) -> None:
+    credential = tmp_path / "localllm-search-api-key"
+    credential.write_text(SEARCH_API_KEY, encoding="ascii")
+    credential.chmod(0o600)
+    settings = Settings(
+        api_key=OPENAI_API_KEY,
+        search_api_key_file=credential,
+        _env_file=None,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        with TestClient(app) as client:
+            manager = client.app.state.research
+
+            async def search(query: str, mode: str, limit: int):
+                assert (query, mode, limit) == ("verified research", "papers", 5)
+                return empty_search_outcome(query, mode)
+
+            manager.quick_search = search
+            status = client.get("/api/search/status")
+            missing = client.post(
+                "/api/search",
+                json={"query": "verified research", "mode": "papers", "limit": 5},
+            )
+            wrong = client.post(
+                "/api/search",
+                headers={"Authorization": "Bearer wrong-search-credential"},
+                json={"query": "verified research", "mode": "papers", "limit": 5},
+            )
+            duplicate = client.post(
+                "/api/search",
+                headers=[
+                    ("Authorization", f"Bearer {SEARCH_API_KEY}"),
+                    ("Authorization", f"Bearer {SEARCH_API_KEY}"),
+                ],
+                json={"query": "verified research", "mode": "papers", "limit": 5},
+            )
+            exact = client.post(
+                "/api/search",
+                headers={"Authorization": f"Bearer {SEARCH_API_KEY}"},
+                json={"query": "verified research", "mode": "papers", "limit": 5},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status.status_code == 200
+    assert status.json()["authentication"] == {
+        "required": True,
+        "scheme": "bearer",
+        "scope": "quick-search",
+    }
+    assert_private_search_response(status)
+    for response in (missing, wrong, duplicate):
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid search API key"}
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert_private_search_response(response)
+    assert exact.status_code == 200
+    assert exact.json()["query"] == "verified research"
+    assert_private_search_response(exact)
+    for response in (status, missing, wrong, duplicate, exact):
+        assert SEARCH_API_KEY not in response.text
+        assert OPENAI_API_KEY not in response.text
+
+
 @pytest.mark.parametrize(
     "headers",
     [
