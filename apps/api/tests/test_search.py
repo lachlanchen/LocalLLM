@@ -116,6 +116,8 @@ def test_arxiv_atom_identity_is_pinned_to_https(raw: str, expected: str) -> None
         "http://arxiv.org:443/abs/2005.11401",
         "https://arxiv.org:80/abs/2005.11401",
         "https://arxiv.org/abs/2005.11401?download=1",
+        "https://arxiv.org./abs/2005.11401",
+        "https://arxiv.org.../abs/2005.11401",
         "https://arxiv.org/pdf/2005.11401",
         "https://arxiv.org/abs/../2005.11401",
     ],
@@ -132,6 +134,54 @@ def test_arxiv_query_extracts_only_explicit_prefixed_or_bare_identity_lists() ->
     assert _query_arxiv_ids("arXiv:hep-th/9901001v2") == ("hep-th/9901001v2",)
     assert _query_arxiv_ids("A decimal 2005.11401 appears in an ordinary sentence") == ()
     assert _query_arxiv_ids("arxiv.org.evil/abs/2005.11401") == ()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "https://evil-arxiv.org/abs/2005.11401",
+        "https://evil.example/arxiv.org/abs/2005.11401",
+        "https://evil.example/10.48550/arxiv.2005.11401",
+        "https://evil.example?next=arxiv.org/abs/2005.11401",
+        "https://evil.example\\arxiv.org/abs/2005.11401",
+        "https://evil.example/(arxiv.org/abs/2005.11401)",
+        "https://evil.example/?next=(arxiv.org/abs/2005.11401)",
+        "https://evil.example/?next=[arXiv:2005.11401]",
+        'https://evil.example/#"10.48550/arxiv.2005.11401"',
+        "arXiv:2005.11401_suffix",
+        "arXiv:2005.11401.evil",
+        "arXiv:2005.11401%2Fpdf",
+        "arXiv:2005.11401)evil",
+        "https://arxiv.org/abs/2005.11401)evil",
+    ],
+)
+def test_arxiv_query_rejects_lookalike_authorities_paths_and_suffixes(query: str) -> None:
+    assert _query_arxiv_ids(query) == ()
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Find arXiv:2005.11401.", ("2005.11401",)),
+        ("Find (arXiv : 2005.11401).", ("2005.11401",)),
+        (
+            'Compare [arXiv:2005.11401] and "10.48550/arXiv.2309.01431".',
+            ("2005.11401", "2309.01431"),
+        ),
+        ("2005.11401,2309.01431", ("2005.11401", "2309.01431")),
+        ("2005.11401;2309.01431", ("2005.11401", "2309.01431")),
+    ],
+)
+def test_arxiv_query_accepts_sentence_terminators_and_compact_bare_lists(
+    query: str, expected: tuple[str, ...]
+) -> None:
+    assert _query_arxiv_ids(query) == expected
+
+
+def test_arxiv_query_deduplicates_before_applying_identifier_bound() -> None:
+    query = " ".join(["arXiv:hep-th/9901001", "arXiv:HEP-TH/9901001"] * 11 + ["arXiv:2309.01431"])
+
+    assert _query_arxiv_ids(query) == ("hep-th/9901001", "2309.01431")
 
 
 def test_plain_text_normalization_is_linear_and_prebounded_for_malformed_markup() -> None:
@@ -850,3 +900,30 @@ async def test_arxiv_provider_uses_exact_id_list_for_verbose_identifier_request(
         "https://arxiv.org/abs/2005.11401v4",
         "https://arxiv.org/abs/2309.01431v2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_arxiv_provider_filters_unrequested_and_wrong_version_atom_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ArxivProvider(settings())
+    atom = """<?xml version='1.0'?>
+    <feed xmlns='http://www.w3.org/2005/Atom'>
+      <entry><id>https://arxiv.org/abs/9999.99999v1</id>
+      <title>Unrequested paper</title></entry>
+      <entry><id>https://arxiv.org/abs/2005.11401v4</id>
+      <title>Wrong requested version</title></entry>
+      <entry><id>https://arxiv.org.../abs/2005.11401v3</id>
+      <title>Invalid repeated-dot authority</title></entry>
+      <entry><id>https://arxiv.org/abs/2005.11401v3</id>
+      <title>Exact requested version</title></entry>
+    </feed>"""
+
+    async def response(*_args, **_kwargs):
+        return atom
+
+    monkeypatch.setattr(provider, "_text", response)
+    results = await provider.search("arXiv:2005.11401v3", 1)
+
+    assert [source.url for source in results] == ["https://arxiv.org/abs/2005.11401v3"]
+    assert [source.provenance[0]["record_id"] for source in results] == ["2005.11401v3"]

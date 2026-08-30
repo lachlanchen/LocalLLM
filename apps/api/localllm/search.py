@@ -283,27 +283,61 @@ def _normalise_doi(value: object) -> str | None:
 
 _ARXIV_IDENTIFIER = r"(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z0-9.-]*/\d{7})(?:v[1-9]\d*)?"
 _ARXIV_ID_PATH = re.compile(rf"^/abs/(?P<identifier>{_ARXIV_IDENTIFIER})$")
-_ARXIV_QUERY_ID = re.compile(
-    rf"(?:\barxiv\s*:\s*|\b(?:https?://)?arxiv\.org/abs/|\b10\.48550/arxiv\.)"
-    rf"(?P<identifier>{_ARXIV_IDENTIFIER})(?![A-Za-z0-9./-])",
-    flags=re.IGNORECASE,
+_ARXIV_QUERY_LEFT_BOUNDARY = r"(?:^|(?<=\s))[([{<\"'“‘]*"
+_ARXIV_QUERY_RIGHT_BOUNDARY = r"[])}>\"'”’]*[.,;:!?]?(?=$|\s)"
+_ARXIV_QUERY_PATTERNS = tuple(
+    re.compile(expression, flags=re.IGNORECASE)
+    for expression in (
+        rf"{_ARXIV_QUERY_LEFT_BOUNDARY}arxiv\s*:\s*"
+        rf"(?P<identifier>{_ARXIV_IDENTIFIER}){_ARXIV_QUERY_RIGHT_BOUNDARY}",
+        rf"{_ARXIV_QUERY_LEFT_BOUNDARY}(?:https?://)?arxiv\.org/abs/"
+        rf"(?P<identifier>{_ARXIV_IDENTIFIER}){_ARXIV_QUERY_RIGHT_BOUNDARY}",
+        rf"{_ARXIV_QUERY_LEFT_BOUNDARY}(?:(?:https?://)?doi\.org/)?"
+        rf"10\.48550/arxiv\.(?P<identifier>{_ARXIV_IDENTIFIER})"
+        rf"{_ARXIV_QUERY_RIGHT_BOUNDARY}",
+    )
 )
 _ARXIV_BARE_ID_LIST = re.compile(
-    rf"^\s*(?P<identifiers>{_ARXIV_IDENTIFIER}(?:\s*[,;]?\s+{_ARXIV_IDENTIFIER})*)\s*$",
+    rf"^\s*(?P<identifiers>{_ARXIV_IDENTIFIER}"
+    rf"(?:\s*(?:[,;]\s*|\s+){_ARXIV_IDENTIFIER})*)\s*\.?\s*$",
     flags=re.IGNORECASE,
 )
+_ARXIV_VERSION_SUFFIX = re.compile(r"v[1-9]\d*$", flags=re.IGNORECASE)
 
 
 def _query_arxiv_ids(value: str) -> tuple[str, ...]:
     """Extract explicit arXiv identities without interpreting ordinary numbers as IDs."""
 
     query = value[:800]
-    identifiers = [match.group("identifier") for match in _ARXIV_QUERY_ID.finditer(query)]
-    if not identifiers:
+    located = sorted(
+        (match.start(), match.group("identifier"))
+        for pattern in _ARXIV_QUERY_PATTERNS
+        for match in pattern.finditer(query)
+    )
+    if located:
+        identifiers = [identifier for _offset, identifier in located]
+    else:
         bare = _ARXIV_BARE_ID_LIST.fullmatch(query)
-        if bare:
-            identifiers = re.findall(_ARXIV_IDENTIFIER, bare.group("identifiers"), re.IGNORECASE)
-    return tuple(dict.fromkeys(identifiers[:20]))
+        identifiers = (
+            re.findall(_ARXIV_IDENTIFIER, bare.group("identifiers"), re.IGNORECASE) if bare else []
+        )
+    distinct: dict[str, str] = {}
+    for identifier in identifiers:
+        distinct.setdefault(identifier.casefold(), identifier)
+    return tuple(distinct.values())[:20]
+
+
+def _arxiv_response_matches_request(returned: str, requested: tuple[str, ...]) -> bool:
+    returned_folded = returned.casefold()
+    returned_base = _ARXIV_VERSION_SUFFIX.sub("", returned_folded)
+    return any(
+        returned_folded == candidate.casefold()
+        or (
+            _ARXIV_VERSION_SUFFIX.search(candidate) is None
+            and returned_base == candidate.casefold()
+        )
+        for candidate in requested
+    )
 
 
 def _canonical_arxiv_entry_url(value: object) -> str:
@@ -317,7 +351,7 @@ def _canonical_arxiv_entry_url(value: object) -> str:
     match = _ARXIV_ID_PATH.fullmatch(parsed.path)
     if (
         parsed.scheme not in {"http", "https"}
-        or (parsed.hostname or "").casefold().rstrip(".") != "arxiv.org"
+        or (parsed.hostname or "").casefold() != "arxiv.org"
         or parsed.username
         or parsed.password
         or not (
@@ -1102,8 +1136,15 @@ class ArxivProvider(HTTPProvider):
             raise ProviderResponseError("arxiv returned invalid Atom XML") from exc
         namespace = {"atom": "http://www.w3.org/2005/Atom"}
         sources: list[ResearchSource] = []
-        for entry in root.findall("atom:entry", namespace)[: min(limit, MAX_PROVIDER_RECORDS)]:
+        for entry in root.findall("atom:entry", namespace)[:MAX_PROVIDER_RECORDS]:
             entry_id = entry.findtext("atom:id", default="", namespaces=namespace)
+            canonical_entry_url = _canonical_arxiv_entry_url(entry_id)
+            identity_match = _ARXIV_ID_PATH.fullmatch(urlparse(canonical_entry_url).path)
+            returned_identifier = identity_match.group("identifier") if identity_match else ""
+            if identifiers and not _arxiv_response_matches_request(
+                returned_identifier, identifiers
+            ):
+                continue
             authors = [
                 author.findtext("atom:name", default="", namespaces=namespace)
                 for author in entry.findall("atom:author", namespace)[:20]
@@ -1113,14 +1154,16 @@ class ArxivProvider(HTTPProvider):
                 kind=self.kind,
                 query=query,
                 title=entry.findtext("atom:title", default="", namespaces=namespace),
-                url=_canonical_arxiv_entry_url(entry_id),
+                url=canonical_entry_url,
                 snippet=entry.findtext("atom:summary", default="", namespaces=namespace),
                 authors=authors,
                 published_date=entry.findtext("atom:published", default="", namespaces=namespace),
-                record_id=entry_id.rsplit("/", 1)[-1],
+                record_id=returned_identifier,
             )
             if item:
                 sources.append(item)
+                if len(sources) >= limit:
+                    break
         return sources
 
 
