@@ -281,6 +281,38 @@ def _normalise_doi(value: object) -> str | None:
     return doi if len(doi) <= MAX_DOI_CHARS and re.fullmatch(r"10\.\d{4,9}/\S+", doi) else None
 
 
+_ARXIV_ID_PATH = re.compile(
+    r"^/abs/(?P<identifier>(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z0-9.-]*/\d{7})(?:v[1-9]\d*)?)$"
+)
+
+
+def _canonical_arxiv_entry_url(value: object) -> str:
+    """Pin Atom entry identities to arxiv.org HTTPS before general normalization."""
+
+    parsed = urlparse(str(value or "").strip())
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    match = _ARXIV_ID_PATH.fullmatch(parsed.path)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or (parsed.hostname or "").casefold().rstrip(".") != "arxiv.org"
+        or parsed.username
+        or parsed.password
+        or not (
+            port is None
+            or (parsed.scheme == "http" and port == 80)
+            or (parsed.scheme == "https" and port == 443)
+        )
+        or parsed.query
+        or parsed.fragment
+        or match is None
+    ):
+        return ""
+    return f"https://arxiv.org/abs/{match.group('identifier')}"
+
+
 def _canonical_url(url: str) -> str:
     url = url.strip()
     if len(url) > MAX_SOURCE_URL_CHARS:
@@ -1057,7 +1089,7 @@ class ArxivProvider(HTTPProvider):
                 kind=self.kind,
                 query=query,
                 title=entry.findtext("atom:title", default="", namespaces=namespace),
-                url=entry_id,
+                url=_canonical_arxiv_entry_url(entry_id),
                 snippet=entry.findtext("atom:summary", default="", namespaces=namespace),
                 authors=authors,
                 published_date=entry.findtext("atom:published", default="", namespaces=namespace),

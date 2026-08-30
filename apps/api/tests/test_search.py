@@ -23,6 +23,7 @@ from localllm.search import (
     SemanticScholarProvider,
     WikipediaProvider,
     _bounded_records,
+    _canonical_arxiv_entry_url,
     _canonical_url,
     _load_bounded_json,
     _matches_query_site,
@@ -93,6 +94,33 @@ def test_canonical_url_removes_fragments_and_tracking_but_rejects_credentials() 
     assert _canonical_url("https://example.com/" + "x" * 5_000) == ""
     assert _normalise_doi("https://doi.org/10.1000/Test.1") == "10.1000/test.1"
     assert _normalise_doi("10.1234/" + "x" * 10_000) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("http://arxiv.org/abs/2005.11401v4", "https://arxiv.org/abs/2005.11401v4"),
+        ("https://arxiv.org:443/abs/math.GT/0309136", "https://arxiv.org/abs/math.GT/0309136"),
+    ],
+)
+def test_arxiv_atom_identity_is_pinned_to_https(raw: str, expected: str) -> None:
+    assert _canonical_arxiv_entry_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://arxiv.org.evil.example/abs/2005.11401",
+        "https://user@arxiv.org/abs/2005.11401",
+        "http://arxiv.org:443/abs/2005.11401",
+        "https://arxiv.org:80/abs/2005.11401",
+        "https://arxiv.org/abs/2005.11401?download=1",
+        "https://arxiv.org/pdf/2005.11401",
+        "https://arxiv.org/abs/../2005.11401",
+    ],
+)
+def test_arxiv_atom_identity_rejects_lookalikes_and_ambiguous_urls(raw: str) -> None:
+    assert _canonical_arxiv_entry_url(raw) == ""
 
 
 def test_plain_text_normalization_is_linear_and_prebounded_for_malformed_markup() -> None:
@@ -761,7 +789,7 @@ async def test_arxiv_parser_uses_atom_metadata(monkeypatch: pytest.MonkeyPatch) 
     provider = ArxivProvider(settings())
     atom = """<?xml version='1.0'?>
     <feed xmlns='http://www.w3.org/2005/Atom'>
-      <entry><id>https://arxiv.org/abs/2401.00001</id><title>Test paper</title>
+      <entry><id>http://arxiv.org/abs/2401.00001</id><title>Test paper</title>
       <summary>Grounded abstract</summary><published>2024-01-02T00:00:00Z</published>
       <author><name>Ada Lovelace</name></author></entry>
     </feed>"""
