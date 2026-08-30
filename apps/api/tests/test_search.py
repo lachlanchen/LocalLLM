@@ -29,6 +29,7 @@ from localllm.search import (
     _matches_query_site,
     _normalise_doi,
     _plain_text,
+    _query_arxiv_ids,
     _query_site_hosts,
     _source,
     _structured_keyword_query,
@@ -121,6 +122,16 @@ def test_arxiv_atom_identity_is_pinned_to_https(raw: str, expected: str) -> None
 )
 def test_arxiv_atom_identity_rejects_lookalikes_and_ambiguous_urls(raw: str) -> None:
     assert _canonical_arxiv_entry_url(raw) == ""
+
+
+def test_arxiv_query_extracts_only_explicit_prefixed_or_bare_identity_lists() -> None:
+    assert _query_arxiv_ids(
+        "Find arXiv:2005.11401 and DOI 10.48550/arXiv.2309.01431; repeat arXiv:2005.11401"
+    ) == ("2005.11401", "2309.01431")
+    assert _query_arxiv_ids("2005.11401 2309.01431") == ("2005.11401", "2309.01431")
+    assert _query_arxiv_ids("arXiv:hep-th/9901001v2") == ("hep-th/9901001v2",)
+    assert _query_arxiv_ids("A decimal 2005.11401 appears in an ordinary sentence") == ()
+    assert _query_arxiv_ids("arxiv.org.evil/abs/2005.11401") == ()
 
 
 def test_plain_text_normalization_is_linear_and_prebounded_for_malformed_markup() -> None:
@@ -804,3 +815,38 @@ async def test_arxiv_parser_uses_atom_metadata(monkeypatch: pytest.MonkeyPatch) 
     assert results[0].snippet == "Grounded abstract"
     assert results[0].authors == ["Ada Lovelace"]
     assert results[0].year == 2024
+
+
+@pytest.mark.asyncio
+async def test_arxiv_provider_uses_exact_id_list_for_verbose_identifier_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ArxivProvider(settings())
+    atom = """<?xml version='1.0'?>
+    <feed xmlns='http://www.w3.org/2005/Atom'>
+      <entry><id>http://arxiv.org/abs/2005.11401v4</id>
+      <title>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</title>
+      <published>2020-05-22T00:00:00Z</published></entry>
+      <entry><id>http://arxiv.org/abs/2309.01431v2</id>
+      <title>Benchmarking Large Language Models in Retrieval-Augmented Generation</title>
+      <published>2023-09-04T00:00:00Z</published></entry>
+    </feed>"""
+    captured: dict[str, object] = {}
+
+    async def response(url: str, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return atom
+
+    monkeypatch.setattr(provider, "_text", response)
+    results = await provider.search(
+        "Find exactly arXiv:2005.11401 and arXiv:2309.01431, then summarize them.", 8
+    )
+
+    assert captured == {
+        "url": "https://export.arxiv.org/api/query",
+        "params": {"start": 0, "max_results": 2, "id_list": "2005.11401,2309.01431"},
+    }
+    assert [source.url for source in results] == [
+        "https://arxiv.org/abs/2005.11401v4",
+        "https://arxiv.org/abs/2309.01431v2",
+    ]

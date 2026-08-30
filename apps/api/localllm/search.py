@@ -281,9 +281,29 @@ def _normalise_doi(value: object) -> str | None:
     return doi if len(doi) <= MAX_DOI_CHARS and re.fullmatch(r"10\.\d{4,9}/\S+", doi) else None
 
 
-_ARXIV_ID_PATH = re.compile(
-    r"^/abs/(?P<identifier>(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z0-9.-]*/\d{7})(?:v[1-9]\d*)?)$"
+_ARXIV_IDENTIFIER = r"(?:\d{4}\.\d{4,5}|[A-Za-z][A-Za-z0-9.-]*/\d{7})(?:v[1-9]\d*)?"
+_ARXIV_ID_PATH = re.compile(rf"^/abs/(?P<identifier>{_ARXIV_IDENTIFIER})$")
+_ARXIV_QUERY_ID = re.compile(
+    rf"(?:\barxiv\s*:\s*|\b(?:https?://)?arxiv\.org/abs/|\b10\.48550/arxiv\.)"
+    rf"(?P<identifier>{_ARXIV_IDENTIFIER})(?![A-Za-z0-9./-])",
+    flags=re.IGNORECASE,
 )
+_ARXIV_BARE_ID_LIST = re.compile(
+    rf"^\s*(?P<identifiers>{_ARXIV_IDENTIFIER}(?:\s*[,;]?\s+{_ARXIV_IDENTIFIER})*)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _query_arxiv_ids(value: str) -> tuple[str, ...]:
+    """Extract explicit arXiv identities without interpreting ordinary numbers as IDs."""
+
+    query = value[:800]
+    identifiers = [match.group("identifier") for match in _ARXIV_QUERY_ID.finditer(query)]
+    if not identifiers:
+        bare = _ARXIV_BARE_ID_LIST.fullmatch(query)
+        if bare:
+            identifiers = re.findall(_ARXIV_IDENTIFIER, bare.group("identifiers"), re.IGNORECASE)
+    return tuple(dict.fromkeys(identifiers[:20]))
 
 
 def _canonical_arxiv_entry_url(value: object) -> str:
@@ -1063,14 +1083,18 @@ class ArxivProvider(HTTPProvider):
     kind = "paper"
 
     async def search(self, query: str, limit: int) -> list[ResearchSource]:
+        identifiers = _query_arxiv_ids(query)
+        params: dict[str, object] = {
+            "start": 0,
+            "max_results": min(limit, len(identifiers) or 20, 20),
+        }
+        if identifiers:
+            params["id_list"] = ",".join(identifiers)
+        else:
+            params.update({"search_query": f"all:{query}", "sortBy": "relevance"})
         document = await self._text(
             "https://export.arxiv.org/api/query",
-            params={
-                "search_query": f"all:{query}",
-                "start": 0,
-                "max_results": min(limit, 20),
-                "sortBy": "relevance",
-            },
+            params=params,
         )
         try:
             root = ET.fromstring(document)
