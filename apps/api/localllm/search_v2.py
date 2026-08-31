@@ -11,6 +11,7 @@ import threading
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import date
 from functools import partial
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
@@ -40,6 +41,7 @@ EXACT_SEARCH_ADMISSION_TIMEOUT_SECONDS = 0.5
 EXACT_SEARCH_OVERALL_TIMEOUT_SECONDS = 45.0
 
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_PUBLISHED_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DNS_LABEL_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _DOI_ARXIV_PREFIX = "10.48550/arxiv."
 _MODERN_ARXIV_PATTERN = re.compile(
@@ -50,6 +52,18 @@ _LEGACY_ARXIV_PATTERN = re.compile(
     r"(?P<sequence>\d{7})(?P<version>v[1-9]\d*)?"
 )
 _ARXIV_VERSION_PATTERN = re.compile(r"(?P<root>.+?)(?P<version>v[1-9]\d*)$")
+
+
+def _canonical_published_date(value: object) -> str | None:
+    """Keep only a real canonical calendar date at the v2 trust boundary."""
+
+    if not isinstance(value, str) or _PUBLISHED_DATE_PATTERN.fullmatch(value) is None:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.isoformat() == value else None
 
 
 class _ProcessWideExactSearchAdmission:
@@ -337,6 +351,13 @@ class SearchSourceResponseV2(_StrictV2Model):
     matched_exact_identifiers: list[MatchedExactIdentifierV2] = Field(
         alias="matchedExactIdentifiers"
     )
+
+    @field_validator("published_date")
+    @classmethod
+    def require_canonical_published_date(cls, value: str | None) -> str | None:
+        if value is not None and _canonical_published_date(value) != value:
+            raise ValueError("published_date must be a canonical calendar date or null")
+        return value
 
 
 class SearchProviderResponseV2(_StrictV2Model):
@@ -797,6 +818,7 @@ def _enrich_source(
     identity_digest = compute_source_identity_digest(canonical_url, domain, identifiers)
     public = source.public_dict()
     public["url"] = canonical_url
+    public["published_date"] = _canonical_published_date(source.published_date)
     public["doi"] = next(
         (identifier["value"] for identifier in identifiers if identifier["kind"] == "doi"),
         None,

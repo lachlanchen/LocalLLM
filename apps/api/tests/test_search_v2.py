@@ -122,6 +122,7 @@ def source(
     *,
     doi: str | None = None,
     provider: str = "crossref",
+    published_date: str | None = "2024-01-02",
     query: str = "verified research",
 ) -> ResearchSource:
     return ResearchSource(
@@ -133,7 +134,7 @@ def source(
         kind="paper",
         authors=["Ada Lovelace"],
         year=2024,
-        published_date="2024-01-02",
+        published_date=published_date,
         doi=doi,
         citation_count=9,
         score=4.2,
@@ -206,6 +207,45 @@ def test_ranked_v2_echoes_request_and_binds_ordered_canonical_source_identities(
     )
     assert body["resolvedIdentifiers"] == []
     assert body["unresolvedIdentifiers"] == []
+
+
+@pytest.mark.parametrize(
+    ("published_date", "expected"),
+    [
+        ("2026", None),
+        ("2026-02", None),
+        ("2026-02-29", None),
+        ("2024-02-29", "2024-02-29"),
+        (None, None),
+    ],
+)
+def test_v2_normalizes_provider_dates_to_canonical_calendar_dates_or_null(
+    published_date: str | None,
+    expected: str | None,
+) -> None:
+    payload = v2_payload(limit=1)
+    with TestClient(app) as client:
+        manager = client.app.state.research
+
+        async def search(query: str, mode: str, limit: int) -> SearchOutcome:
+            return SearchOutcome(
+                query=query,
+                mode=mode,
+                sources=[
+                    source(
+                        "https://example.com/provider-date",
+                        published_date=published_date,
+                    )
+                ],
+                providers=[],
+            )
+
+        manager.quick_search = search
+        response = client.post("/api/search/v2", json=payload)
+
+    assert response.status_code == 200
+    assert_private(response)
+    assert response.json()["sources"][0]["published_date"] == expected
 
 
 def test_ranked_allowed_domains_overfetches_before_filtering_and_truncating() -> None:
