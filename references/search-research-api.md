@@ -9,10 +9,11 @@ to discover or invoke tools reliably on its own.
 These management routes use `http://127.0.0.1:8008/api/...`; they are separate
 from the OpenAI-compatible `/v1/*` surface. Search, Research, conversations,
 grounded Chat, and Agent routes do **not** consult `LOCALLLM_API_KEY`.
-`POST /api/search` instead supports its own application credential,
+`POST /api/search` and `POST /api/search/v2` instead support their own application
+credential,
 `LOCALLLM_SEARCH_API_KEY`, or the preferred file-backed
 `LOCALLLM_SEARCH_API_KEY_FILE`. The settings are mutually exclusive. When one
-is configured, the route requires exactly one
+is configured, each route requires exactly one
 `Authorization: Bearer <search-key>` header. The scheme spelling,
 single space, token, and header cardinality are exact; missing, duplicated,
 malformed, or wrong credentials return the same HTTP 401 response with
@@ -102,6 +103,7 @@ received, including chunked bodies. Oversized requests receive HTTP 413.
 | Route | Maximum encoded request body |
 | --- | ---: |
 | `POST /api/search` | 16 KiB |
+| `POST /api/search/v2` | 16 KiB |
 | `POST /api/research` | 32 KiB |
 | `POST /api/agent/chat` | 25 MiB |
 
@@ -151,6 +153,164 @@ Federation performs deterministic URL/DOI/title deduplication and reciprocal-ran
 query-overlap, corroboration, citation, and recency scoring. `both` mode reserves
 space for both web and paper evidence before filling the remaining positions by
 global score.
+
+### Provider-neutral search v2
+
+`POST /api/search/v2` is a separate, strict contract; the legacy route and its
+response bytes are unchanged. It uses the same search-scoped Bearer dependency and
+its own 16 KiB reader. Every exact-path response, including authentication,
+validation, body-limit, provider, and internal errors, is `Cache-Control: no-store`
+and has all `Set-Cookie` fields removed. Duplicate JSON member names and undeclared
+request fields are rejected.
+
+The required DTO is:
+
+```json
+{
+  "schemaVersion": "localllm-grounded-search-request-v2",
+  "query": "retrieval grounded citation accuracy",
+  "mode": "papers",
+  "limit": 4,
+  "constraints": {
+    "schemaVersion": "localllm-grounded-search-policy-v1",
+    "strategy": "ranked",
+    "allowedDomains": ["example.com"],
+    "exactIdentifiers": [],
+    "queryPlanDigest": "sha256:<64-lowercase-hex>",
+    "policyDigest": "sha256:<64-lowercase-hex>"
+  }
+}
+```
+
+All fields are required and type-strict. `query` is NFC, 3–800 characters, uses
+single spaces with no leading/trailing whitespace, and must be unchanged by the
+provider privacy-redaction pass. `mode` is `web`, `papers`, or `both`; `limit` is an
+integer from 1 through 30. `allowedDomains` contains at most 16 sorted, unique,
+lowercase public DNS names (never a bare public suffix). Matching is hostname-exact
+or dot-delimited subdomain matching; suffix lookalikes such as
+`example.com.evil.invalid` do not match `example.com`.
+For a ranked request with a domain policy, v2 asks federation for a candidate pool
+of `min(30, max(limit + 1, limit * 3))` before the hard domain filter and then
+truncates to `limit`. Each provider request retains the existing security cap of 20
+records, and the actual pool can be smaller after provider yield, validation, and
+deduplication. This bounded over-fetch can recover an allowed result at provider
+rank 13 without claiming that every filtered slot can always be refilled.
+
+`exactIdentifiers` contains at most eight sorted, unique `{kind,value}` records,
+ordered by `kind` and then `value`. A DOI is its lowercase bare DOI. A
+`10.48550/arxiv.*` DOI alias is noncanonical and must instead be one `arxiv`
+identity; a suffix that is not a valid strict arXiv ID is rejected rather than
+treated as an ordinary DOI, so the same identity is never represented as both DOI and arXiv. Legacy
+arXiv IDs use lowercase `category/` plus exactly seven digits with a nonzero sequence.
+Modern IDs from `0704` through `1412` use exactly four sequence digits; IDs from
+`1501` onward use exactly five. The month is `01`–`12`, the sequence is nonzero,
+and an optional version is `v` plus a positive integer without leading zeroes.
+`ranked` forbids exact identifiers. `exact` requires one or more, requires
+`papers` or `both`, and `limit` must cover their count.
+
+The policy digest algorithm is deterministic:
+
+1. Build an object with top-level `schemaVersion`, `query`, `mode`, `limit`, and a
+   `constraints` object containing only `schemaVersion`, `strategy`,
+   `allowedDomains`, and `exactIdentifiers`. Thus both schema versions are bound;
+   Both digest fields, `queryPlanDigest` and `policyDigest`, are excluded.
+2. Encode that object with UTF-8 JSON using recursively sorted object keys, no ASCII
+   escaping, no insignificant whitespace (`,` and `:` separators), and no non-finite
+   numbers. This is equivalent to Python `json.dumps(value, ensure_ascii=False,
+   sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")`.
+3. Set `policyDigest` to lowercase `sha256:` plus the SHA-256 hex digest of those
+   bytes. LocalLLM recomputes it and rejects any mismatch. `queryPlanDigest` remains
+   an opaque correlation input and is not interpreted.
+
+A successful response has schema
+`localllm-grounded-search-response-v2`, `policyCompliant: true`, an exact normalized
+`request` echo, normalized provider diagnostics/warnings, `resolvedIdentifiers` and
+`unresolvedIdentifiers`, and enriched sources. Each source includes its legacy
+normalized metadata plus `rank`, `canonicalUrl`, `domain`, canonical `identifiers`,
+`identityDigest`, `matchedAllowedDomains`, and `matchedExactIdentifiers`. An exact
+match record binds `requested`, `returned`, and `matchType` (`exact` or
+`arxiv-root`). The source identity digest uses the same canonical JSON/SHA-256
+algorithm over `{canonicalUrl,domain,identifiers}`.
+Metadata DOI claims, DOI-resolver URL identities, arXiv DOI aliases, and arxiv.org
+URL identities are derived independently. Two different explicit identities in the
+same namespace make the whole source ambiguous, so it is discarded before coverage;
+a source cannot prove DOI A using a DOI URL for B or prove two arXiv roots at once.
+
+The fixed source-identity preimage and digest vector is:
+
+```text
+{"canonicalUrl":"https://example.com/paper","domain":"example.com","identifiers":[{"kind":"arxiv","value":"2005.11401v1"},{"kind":"doi","value":"10.1000/example"}]}
+```
+
+`sha256:d3ed58ed7c051d5948cfb3cb212a5b7d3ac06a4544c5e9c0b2a2f7d840db4857`
+
+`returnedIdentityBinding` uses the same digest algorithm over:
+
+```json
+{
+  "queryPlanDigest": "...",
+  "policyDigest": "...",
+  "returnedIdentities": [
+    {
+      "rank": 1,
+      "identityDigest": "...",
+      "matchedAllowedDomains": ["example.com"],
+      "matchedExactIdentifiers": []
+    }
+  ]
+}
+```
+
+Interoperability vectors below are single UTF-8 lines with **no trailing LF**. The
+canonical policy preimage is:
+
+```text
+{"constraints":{"allowedDomains":["arxiv.org","example.com"],"exactIdentifiers":[{"kind":"arxiv","value":"2005.11401v1"},{"kind":"doi","value":"10.1000/example"}],"schemaVersion":"localllm-grounded-search-policy-v1","strategy":"exact"},"limit":2,"mode":"papers","query":"量子 evidence","schemaVersion":"localllm-grounded-search-request-v2"}
+```
+
+Its digest is
+`sha256:ccf5b13b08f247de0033a2c1d4c9bd3866ae0a8ce2b9cf411907080f39ec629c`.
+Using that policy digest, a query-plan digest of `sha256:` followed by 64 `1`
+characters, one identity digest of `sha256:` followed by 64 `2` characters, and the
+shown exact arXiv match produces this returned-binding preimage:
+
+```text
+{"policyDigest":"sha256:ccf5b13b08f247de0033a2c1d4c9bd3866ae0a8ce2b9cf411907080f39ec629c","queryPlanDigest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","returnedIdentities":[{"identityDigest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","matchedAllowedDomains":["arxiv.org"],"matchedExactIdentifiers":[{"matchType":"exact","requested":{"kind":"arxiv","value":"2005.11401v1"},"returned":{"kind":"arxiv","value":"2005.11401v1"}}],"rank":1}]}
+```
+
+Its `returnedIdentityBinding` is
+`sha256:3ddb7b8783c4dd600be7eaeed485f1af2821624232eaab6526426a4027375dd8`.
+
+The order-sensitive two-record vector appends rank 2 with identity digest `sha256:`
+plus 64 `3` characters, matched domain `example.com`, and an exact requested/returned
+DOI of `10.1000/example`. Its exact preimage is:
+
+```text
+{"policyDigest":"sha256:ccf5b13b08f247de0033a2c1d4c9bd3866ae0a8ce2b9cf411907080f39ec629c","queryPlanDigest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","returnedIdentities":[{"identityDigest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","matchedAllowedDomains":["arxiv.org"],"matchedExactIdentifiers":[{"matchType":"exact","requested":{"kind":"arxiv","value":"2005.11401v1"},"returned":{"kind":"arxiv","value":"2005.11401v1"}}],"rank":1},{"identityDigest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","matchedAllowedDomains":["example.com"],"matchedExactIdentifiers":[{"matchType":"exact","requested":{"kind":"doi","value":"10.1000/example"},"returned":{"kind":"doi","value":"10.1000/example"}}],"rank":2}]}
+```
+
+Its digest is
+`sha256:fc7e740594137849892f6d9cd6ac3ad82901eafe8361d43741f8a626c42774dd`;
+reversing the records changes the digest.
+
+The ordered records are exactly those returned to the caller. Ranked results and
+exact lookups are hard-filtered again by domain. DOI resolution uses a deterministic
+federated `doi:<value>` query and then exact canonical-DOI filtering; arXiv resolution
+uses a structured `arXiv:<value>` query and the same hard identity filter. A requested
+version such as `v1` cannot be satisfied by an unversioned result or `v2`. Unproven
+identifiers are reported honestly; conflicting explicit versions of one arXiv root
+fail closed with HTTP 409 unless every requested version is proved by a distinct
+returned identity. The strict response model turns undeclared internal output into a
+private error rather than leaking or silently dropping it.
+
+Exact federation is process-wide admitted: at most two exact requests run lookup
+fanout concurrently, admission waits at most 0.5 seconds before HTTP 429, and each
+admitted lookup set has a hard 45-second response deadline before HTTP 504. At most
+two identifier lookups run inside one admitted request. Errors cancel each
+unfinished sibling once and join it before returning. A deadline response or caller
+cancellation may complete while cancellation cleanup is still running; a tracked,
+cancellation-shielded reaper then retains the admission lease until every owned
+lookup has actually exited, preventing delayed cleanup from reopening capacity.
 
 ## Deep research
 

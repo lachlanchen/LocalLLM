@@ -53,6 +53,7 @@ from .reverse_engineering import (
     inspect_upload,
     re_toolchain_status,
 )
+from .search_v2 import SearchResponseV2, execute_search_v2, parse_search_v2_request
 from .system import find_project_root, gpu_status, storage_status, tool_status
 
 
@@ -158,6 +159,7 @@ REQUEST_BODY_LIMITS = {
     "/api/re/triage": 4 * 1024 * 1024,
     "/api/research": MAX_RESEARCH_JSON_BYTES,
     "/api/search": MAX_SEARCH_JSON_BYTES,
+    "/api/search/v2": MAX_SEARCH_JSON_BYTES,
     "/v1/chat/completions": MAX_OPENAI_JSON_BYTES,
     "/v1/embeddings": 8 * 1024 * 1024,
     "/v1/responses": MAX_OPENAI_JSON_BYTES,
@@ -368,13 +370,16 @@ class BrowserSecurityBoundaryMiddleware:
 
 
 class SearchResponseSecurityMiddleware:
-    """Make every exact quick-search response private, including outer 500 responses."""
+    """Make every exact search response private, including outer 500 responses."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http" or scope.get("path") != "/api/search":
+        if scope.get("type") != "http" or scope.get("path") not in {
+            "/api/search",
+            "/api/search/v2",
+        }:
             await self.app(scope, receive, send)
             return
 
@@ -1079,6 +1084,19 @@ async def quick_search(
     payload = await _bounded_json_model(request, SearchRequest, MAX_SEARCH_JSON_BYTES)
     outcome = await manager.quick_search(payload.query, payload.mode, payload.limit)
     return outcome.public_dict()
+
+
+@app.post(
+    "/api/search/v2",
+    response_model=SearchResponseV2,
+    dependencies=[Depends(require_search_api_key)],
+)
+async def grounded_search_v2(
+    request: Request,
+    manager: ResearchManager = Depends(get_research),
+) -> SearchResponseV2:
+    payload = await parse_search_v2_request(request)
+    return await execute_search_v2(manager, payload)
 
 
 @app.post("/api/research")

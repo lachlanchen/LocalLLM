@@ -278,7 +278,12 @@ class ResearchManager:
         return self.search.status()
 
     async def quick_search(
-        self, query: str, mode: SearchMode = "both", limit: int = 12
+        self,
+        query: str,
+        mode: SearchMode = "both",
+        limit: int = 12,
+        *,
+        provider_candidate_limit: int | None = None,
     ) -> SearchOutcome:
         query = re.sub(r"\s+", " ", redact_url_tokens(query)).strip()[:800]
         if len(query) < 3:
@@ -288,6 +293,7 @@ class ResearchManager:
             mode,
             limit,
             public_url_validator=self._is_public_http_url,
+            provider_candidate_limit=provider_candidate_limit,
         )
 
     def _persist(self, task: ResearchTask) -> None:

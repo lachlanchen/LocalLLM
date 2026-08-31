@@ -534,6 +534,20 @@ async def test_provider_rank_is_preserved_in_provenance() -> None:
     assert ranks == {"First provider result": 1, "Second provider result": 2}
 
 
+@pytest.mark.asyncio
+async def test_legacy_federation_keeps_the_twelve_record_provider_budget() -> None:
+    engine = FederatedSearch(settings(search_max_results=30))
+    provider = FakeProvider("paper_test", "paper")
+    engine._academic = [provider]
+
+    async def public(_url: str) -> bool:
+        return True
+
+    await engine.search("provider budget", "papers", 30, public_url_validator=public)
+
+    assert provider.calls == [("provider budget", 12)]
+
+
 def test_status_marks_keyed_scholar_and_openalex_as_opt_in() -> None:
     unconfigured = FederatedSearch(settings()).status()
     keyed = FederatedSearch(

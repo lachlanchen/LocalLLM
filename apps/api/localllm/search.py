@@ -1608,6 +1608,7 @@ class FederatedSearch:
         limit: int,
         *,
         public_url_validator: Callable[[str], Awaitable[bool]],
+        provider_candidate_limit: int | None = None,
     ) -> SearchOutcome:
         query = re.sub(r"\s+", " ", query).strip()[:800]
         if len(query) < 3:
@@ -1630,8 +1631,16 @@ class FederatedSearch:
         if mode in {"web", "both"} and not self._general:
             providers.extend(self._keyless_web)
 
+        # ``None`` preserves the legacy per-provider budget for existing
+        # callers. Strict v2 may opt into a larger candidate pool, still under
+        # the provider-wide record ceiling used by every adapter.
+        per_provider_limit = (
+            min(limit, 12)
+            if provider_candidate_limit is None
+            else min(MAX_PROVIDER_RECORDS, max(1, provider_candidate_limit))
+        )
         calls = [
-            self._call_provider(provider, query, min(limit, 12), semaphore)
+            self._call_provider(provider, query, per_provider_limit, semaphore)
             for provider in providers
         ]
         results = await asyncio.gather(*calls) if calls else []
@@ -1683,7 +1692,7 @@ class FederatedSearch:
         if mode in {"web", "both"} and self._general and web_count < min(4, limit):
             fallback_results = await asyncio.gather(
                 *(
-                    self._call_provider(provider, query, min(limit, 12), semaphore)
+                    self._call_provider(provider, query, per_provider_limit, semaphore)
                     for provider in self._keyless_web
                 )
             )
