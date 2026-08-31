@@ -13,7 +13,7 @@ die() {
   exit 1
 }
 
-for required_command in awk chmod curl id mkdir mktemp mv sed sleep systemctl; do
+for required_command in awk chmod curl git grep id mkdir mktemp mv sed sleep systemctl; do
   command -v "$required_command" >/dev/null || die "missing prerequisite: $required_command"
 done
 
@@ -29,6 +29,63 @@ read_numeric_setting() {
   fi
   printf '%s' "${value:-$fallback}"
 }
+
+setting_is_declared() {
+  local name="$1"
+
+  if [[ -v "$name" ]]; then
+    return 0
+  fi
+  [[ -f "$project_root/.env" ]] || return 1
+  awk -v key="$name" '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$project_root/.env"
+}
+
+search_credential_source="${LOCALLLM_SEARCH_API_KEY_CREDENTIAL_SOURCE:-}"
+default_search_credential_source="$project_root/.local/private/credentials/localllm-search-api-key"
+installed_api_unit="$service_dir/localllm-api.service"
+if [[ -z "$search_credential_source" && -e "$default_search_credential_source" ]]; then
+  search_credential_source="$default_search_credential_source"
+fi
+if [[ -z "$search_credential_source" && -f "$installed_api_unit" ]] &&
+  grep -Fq 'LoadCredential=localllm-search-api-key:' "$installed_api_unit"; then
+  die "existing Search credential wiring would be dropped; set LOCALLLM_SEARCH_API_KEY_CREDENTIAL_SOURCE"
+fi
+
+search_api_load_credential=''
+if [[ -n "$search_credential_source" ]]; then
+  "$project_root/scripts/verify-private-credential-source.sh" "$search_credential_source" ||
+    die "LOCALLLM_SEARCH_API_KEY_CREDENTIAL_SOURCE failed private-source validation"
+  if setting_is_declared LOCALLLM_SEARCH_API_KEY ||
+    setting_is_declared LOCALLLM_SEARCH_API_KEY_FILE ||
+    setting_is_declared CREDENTIALS_DIRECTORY; then
+    die "file-backed Search credential wiring is mutually exclusive with LOCALLLM_SEARCH_API_KEY, LOCALLLM_SEARCH_API_KEY_FILE, and CREDENTIALS_DIRECTORY"
+  fi
+  search_api_load_credential="LoadCredential=localllm-search-api-key:$search_credential_source"
+  search_api_unset_environment='UnsetEnvironment=LOCALLLM_SEARCH_API_KEY LOCALLLM_SEARCH_API_KEY_FILE CREDENTIALS_DIRECTORY'
+  search_api_exec_environment='CREDENTIALS_DIRECTORY=%d LOCALLLM_SEARCH_API_KEY_FILE=%d/localllm-search-api-key'
+else
+  search_api_unset_environment=''
+  search_api_exec_environment=''
+fi
+
+[[ -z "$(git -C "$project_root" status --porcelain --untracked-files=normal)" ]] ||
+  die "source must be clean before installing a revision-bound service"
+current_revision="$(git -C "$project_root" rev-parse --verify HEAD)"
+deployed_revision="${LOCALLLM_DEPLOYED_REVISION:-$current_revision}"
+[[ "$deployed_revision" =~ ^[0-9a-f]{40}$ ]] ||
+  die "LOCALLLM_DEPLOYED_REVISION must be one lowercase 40-character Git commit"
+git -C "$project_root" cat-file -e "$deployed_revision^{commit}" 2>/dev/null ||
+  die "LOCALLLM_DEPLOYED_REVISION must exist in this repository"
+[[ "$deployed_revision" == "$current_revision" ]] ||
+  die "LOCALLLM_DEPLOYED_REVISION must equal the clean checked-out revision"
+setting_is_declared LOCALLLM_RELEASE_ID &&
+  die "LOCALLLM_RELEASE_ID is generated from the deployed commit and tree and must not be declared"
+deployed_tree="$(git -C "$project_root" rev-parse --verify "$deployed_revision^{tree}")"
+[[ "$deployed_tree" =~ ^[0-9a-f]{40}$ ]] || die "deployed Git tree identity is invalid"
+deployed_release_id="${deployed_revision:0:8}-${deployed_tree:0:8}"
 
 expected_gpu_count="$(read_numeric_setting LOCALLLM_EXPECTED_GPU_COUNT 0)"
 gpu_ready_attempts="$(read_numeric_setting LOCALLLM_GPU_READY_ATTEMPTS 120)"
@@ -205,6 +262,8 @@ for required_path in \
   "$project_root/apps/api/.venv/bin/uvicorn" \
   "$project_root/apps/web/dist/index.html" \
   "$project_root/scripts/parse-ollama-gpu-inventory.awk" \
+  "$project_root/scripts/verify-private-credential-source.sh" \
+  "$project_root/scripts/verify-deployed-revision.sh" \
   "$project_root/scripts/wait-for-gpus.sh"; do
   [[ -e "$required_path" ]] || {
     echo "Missing runtime prerequisite: $required_path" >&2
@@ -235,6 +294,11 @@ for unit in localllm-ollama localllm-api; do
     -e "s|@OLLAMA_CUDA_VISIBLE_DEVICES_ENV@|$ollama_cuda_visible_devices_env|g" \
     -e "s|@LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES_ENV@|$localllm_ollama_cuda_visible_devices_env|g" \
     -e "s|@OLLAMA_VULKAN_ENV@|$ollama_vulkan_env|g" \
+    -e "s|@SEARCH_API_LOAD_CREDENTIAL@|$search_api_load_credential|g" \
+    -e "s|@SEARCH_API_UNSET_ENVIRONMENT@|$search_api_unset_environment|g" \
+    -e "s|@SEARCH_API_EXEC_ENVIRONMENT@|$search_api_exec_environment|g" \
+    -e "s|@DEPLOYED_RELEASE_ID@|$deployed_release_id|g" \
+    -e "s|@DEPLOYED_REVISION@|$deployed_revision|g" \
     "$project_root/deploy/systemd/$unit.service.in" > "$rendered_unit"
   chmod 600 "$rendered_unit"
   mv "$rendered_unit" "$service_dir/$unit.service"

@@ -14,7 +14,13 @@ ProtectKernelTunables=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 EnvironmentFile=-@PROJECT_ROOT@/.env
-ExecStart=@PROJECT_ROOT@/apps/api/.venv/bin/uvicorn localllm.main:app --app-dir @PROJECT_ROOT@/apps/api --host 127.0.0.1 --port 8008
+@SEARCH_API_LOAD_CREDENTIAL@
+# EnvironmentFile= overrides Environment= regardless of directive order. Strip
+# pinned identities here, then set them as explicit /usr/bin/env arguments.
+@SEARCH_API_UNSET_ENVIRONMENT@
+UnsetEnvironment=LOCALLLM_RELEASE_ID
+ExecStartPre=@PROJECT_ROOT@/scripts/verify-deployed-revision.sh @PROJECT_ROOT@ @DEPLOYED_REVISION@
+ExecStart=/usr/bin/env LOCALLLM_RELEASE_ID=@DEPLOYED_RELEASE_ID@ @SEARCH_API_EXEC_ENVIRONMENT@ @PROJECT_ROOT@/apps/api/.venv/bin/uvicorn localllm.main:app --app-dir @PROJECT_ROOT@/apps/api --host 127.0.0.1 --port 8008
 Restart=on-failure
 RestartSec=3
 

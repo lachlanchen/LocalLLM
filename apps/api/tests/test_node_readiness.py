@@ -353,3 +353,30 @@ def test_service_installer_supports_validated_ollama_gpu_isolation() -> None:
     assert "@OLLAMA_CUDA_VISIBLE_DEVICES_ENV@" in unit
     assert "@LOCALLLM_OLLAMA_CUDA_VISIBLE_DEVICES_ENV@" in unit
     assert "@OLLAMA_VULKAN_ENV@" in unit
+
+
+def test_service_installer_persists_file_backed_search_authentication_and_revision() -> None:
+    root = Path(__file__).parents[3]
+    installer = (root / "scripts" / "install-user-services.sh").read_text()
+    unit = (root / "deploy" / "systemd" / "localllm-api.service.in").read_text()
+
+    assert "LOCALLLM_SEARCH_API_KEY_CREDENTIAL_SOURCE" in installer
+    assert ".local/private/credentials/localllm-search-api-key" in installer
+    assert "existing Search credential wiring would be dropped" in installer
+    assert "scripts/verify-private-credential-source.sh" in installer
+    assert "mutually exclusive with LOCALLLM_SEARCH_API_KEY" in installer
+    assert '[[ -v "$name" ]]' in installer
+    assert "export[[:space:]]+" in installer
+    assert "LoadCredential=localllm-search-api-key:$search_credential_source" in installer
+    assert "UnsetEnvironment=LOCALLLM_SEARCH_API_KEY LOCALLLM_SEARCH_API_KEY_FILE CREDENTIALS_DIRECTORY" in installer
+    assert "CREDENTIALS_DIRECTORY=%d LOCALLLM_SEARCH_API_KEY_FILE=%d/localllm-search-api-key" in installer
+    assert "LOCALLLM_DEPLOYED_REVISION must be one lowercase 40-character Git commit" in installer
+    assert "LOCALLLM_DEPLOYED_REVISION must equal the clean checked-out revision" in installer
+    assert 'deployed_release_id="${deployed_revision:0:8}-${deployed_tree:0:8}"' in installer
+    assert "@SEARCH_API_LOAD_CREDENTIAL@" in unit
+    assert "@SEARCH_API_UNSET_ENVIRONMENT@" in unit
+    assert "UnsetEnvironment=LOCALLLM_RELEASE_ID" in unit
+    assert "LOCALLLM_RELEASE_ID=@DEPLOYED_RELEASE_ID@" in unit
+    assert "@SEARCH_API_EXEC_ENVIRONMENT@" in unit
+    assert "@DEPLOYED_REVISION@" in unit
+    assert "scripts/verify-deployed-revision.sh" in unit
