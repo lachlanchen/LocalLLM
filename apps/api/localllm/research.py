@@ -20,6 +20,7 @@ from .catalog import resolve_model
 from .config import Settings
 from .query_privacy import redact_url_tokens
 from .search import (
+    _STRUCTURED_QUERY_STOPWORDS,
     FederatedSearch,
     ProviderDiagnostic,
     ResearchSource,
@@ -41,12 +42,32 @@ _RESEARCH_WRAPPER_PREFIX = re.compile(
 )
 _RESEARCH_OUTPUT_SENTENCE = re.compile(
     r"^(?:please\s+)?(?:produce|return|reply|respond|format|write|create|save|"
-    r"include|cite|support|provide)\b|^(?:do\s+not|don't|dont|never|avoid|skip)\b",
+    r"include|cite|support|provide|finish|complete|distinguish|explain)\b|"
+    r"^(?:do\s+not|don't|dont|never|avoid|skip)\b",
+    flags=re.IGNORECASE,
+)
+_RESEARCH_ACTIVATION_ONLY_SENTENCE = re.compile(
+    r"^(?:please\s+)?(?:run|perform|conduct|do|start)\b[^.!?]{0,240}"
+    r"\b(?:deep\s+research|research|investigation|review)\b[^.!?。！？]*[.!?。！？]?$",
+    flags=re.IGNORECASE,
+)
+_RESEARCH_TOPIC_INTRODUCTION = re.compile(
+    r"\b(?:about|analy[sz](?:e|ing)|compare|comparing|evaluate|evaluating|examine|"
+    r"examining|investigate|investigating|into|on|regarding|whether|what|why|how)\b",
     flags=re.IGNORECASE,
 )
 _COMPARISON_TOPIC = re.compile(
     r"^(?P<context>.+?)\b(?:about|on|regarding)\s+"
     r"(?P<left>.+?)\s+(?:versus|vs\.?|compared\s+(?:with|to))\s+(?P<right>.+)$",
+    flags=re.IGNORECASE,
+)
+_DIRECT_COMPARISON_TOPIC = re.compile(
+    r"^(?:compare|comparison\s+of)\s+(?P<left>.+?)\s+"
+    r"(?:with|versus|vs\.?|to)\s+(?P<right>.+)$",
+    flags=re.IGNORECASE,
+)
+_COMPARISON_SCOPE = re.compile(
+    r"^(?P<right>.+?)\s+(?:for|in|under|when)\s+(?P<scope>.+)$",
     flags=re.IGNORECASE,
 )
 _RESEARCH_CONTEXT_STOPWORDS = {
@@ -110,7 +131,14 @@ def _research_topic(question: str) -> str:
     for index, sentence in enumerate(sentences):
         candidate = sentence.strip()
         if index == 0:
-            candidate = _RESEARCH_WRAPPER_PREFIX.sub("", candidate, count=1).strip()
+            without_wrapper = _RESEARCH_WRAPPER_PREFIX.sub("", candidate, count=1).strip()
+            if (
+                without_wrapper == candidate
+                and _RESEARCH_ACTIVATION_ONLY_SENTENCE.fullmatch(candidate)
+                and not _RESEARCH_TOPIC_INTRODUCTION.search(candidate)
+            ):
+                continue
+            candidate = without_wrapper
         if selected and _RESEARCH_OUTPUT_SENTENCE.match(candidate):
             continue
         if candidate:
@@ -123,31 +151,74 @@ def _comparison_queries(topic: str) -> list[str]:
     """Split an explicit comparison into one bounded query for each side."""
 
     match = _COMPARISON_TOPIC.match(topic.rstrip(" .?!。！？"))
-    if match is None:
+    if match is not None:
+        context_tokens = [
+            token
+            for token in re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", match.group("context"), re.UNICODE)
+            if len(token) > 1 and token.casefold() not in _RESEARCH_CONTEXT_STOPWORDS
+        ]
+        context = " ".join(context_tokens[-6:])
+        left = _structured_keyword_query(match.group("left"))
+        right = _structured_keyword_query(match.group("right"))
+        if context and left and right:
+            return [f"{context} {left}"[:800], f"{context} {right}"[:800]]
+
+    direct = _DIRECT_COMPARISON_TOPIC.match(topic.rstrip(" .?!。！？"))
+    if direct is None:
         return []
-    context_tokens = [
-        token
-        for token in re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", match.group("context"), re.UNICODE)
-        if len(token) > 1 and token.casefold() not in _RESEARCH_CONTEXT_STOPWORDS
+    right_and_scope = direct.group("right")
+    scope_match = _COMPARISON_SCOPE.match(right_and_scope)
+    right_value = scope_match.group("right") if scope_match else right_and_scope
+    scope_value = scope_match.group("scope") if scope_match else ""
+    left = _structured_keyword_query(direct.group("left"))
+    right = _structured_keyword_query(right_value)
+    scope = _structured_keyword_query(scope_value) if scope_value else ""
+    if not left or not right:
+        return []
+    variants = [
+        _structured_keyword_query(" ".join(filter(None, [left, right, scope]))),
+        _structured_keyword_query(" ".join(filter(None, [right, left, scope]))),
     ]
-    context = " ".join(context_tokens[-6:])
-    left = _structured_keyword_query(match.group("left"))
-    right = _structured_keyword_query(match.group("right"))
-    if not context or not left or not right:
-        return []
-    return [f"{context} {left}"[:800], f"{context} {right}"[:800]]
+    return [query[:800] for query in dict.fromkeys(variants) if len(query) >= 3]
 
 
 def _research_relevance_terms(topic: str) -> set[str]:
-    return _lexical_tokens(_structured_keyword_query(topic)) - _RESEARCH_RELEVANCE_STOPWORDS
+    return _lexical_tokens(_structured_keyword_query(topic)) - (
+        _RESEARCH_RELEVANCE_STOPWORDS | _STRUCTURED_QUERY_STOPWORDS
+    )
 
 
-def _source_matches_research_topic(source: ResearchSource, terms: set[str]) -> bool:
+def _comparison_anchor_terms(topic: str) -> set[str]:
+    """Return the compared subjects without surrounding usage-scenario prose."""
+
+    normalized = topic.rstrip(" .?!。！？")
+    contextual = _COMPARISON_TOPIC.match(normalized)
+    if contextual is not None:
+        values = [contextual.group("context"), contextual.group("left"), contextual.group("right")]
+    else:
+        direct = _DIRECT_COMPARISON_TOPIC.match(normalized)
+        if direct is None:
+            return set()
+        right_and_scope = direct.group("right")
+        scope = _COMPARISON_SCOPE.match(right_and_scope)
+        values = [direct.group("left"), scope.group("right") if scope else right_and_scope]
+    return _research_relevance_terms(" ".join(values)) - {"compare", "mode", "modes"}
+
+
+def _source_matches_research_topic(
+    source: ResearchSource,
+    terms: set[str],
+    anchor_terms: set[str] | None = None,
+) -> bool:
     if not terms:
         return True
     source_terms = _lexical_tokens(f"{source.title} {source.snippet} {source.url}")
     required = 2 if len(terms) >= 3 else 1
-    return len(terms & source_terms) >= required
+    if len(terms & source_terms) < required:
+        return False
+    anchors = anchor_terms or set()
+    anchor_required = 2 if len(anchors) >= 3 else 1
+    return not anchors or len(anchors & source_terms) >= anchor_required
 
 
 def _official_entity_terms(topic: str) -> set[str]:
@@ -686,6 +757,7 @@ class ResearchManager:
             collected.extend(outcome.sources)
             diagnostics.extend(outcome.providers)
         topic = _research_topic(task.question)
+        comparison_anchors = _comparison_anchor_terms(topic)
         official_entities = _official_entity_terms(topic)
         if official_entities and task.mode in {"web", "both"}:
             # Once federation has returned an entity-named host, use the already
@@ -716,7 +788,7 @@ class ResearchManager:
                         _lexical_tokens(urlparse(source.url).path) & _NON_DOCUMENT_PATH_TERMS
                     )
                     and _source_matches_research_topic(
-                        source, _research_relevance_terms(topic)
+                        source, _research_relevance_terms(topic), comparison_anchors
                     )
                 }
                 if len(credible_documents) >= 2:
@@ -730,7 +802,9 @@ class ResearchManager:
         sources = self.search._deduplicate(collected)
         relevance_terms = _research_relevance_terms(topic)
         sources = [
-            source for source in sources if _source_matches_research_topic(source, relevance_terms)
+            source
+            for source in sources
+            if _source_matches_research_topic(source, relevance_terms, comparison_anchors)
         ]
         if official_entities:
             official_documents = [

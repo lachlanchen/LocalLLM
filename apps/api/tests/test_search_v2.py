@@ -248,6 +248,29 @@ def test_v2_normalizes_provider_dates_to_canonical_calendar_dates_or_null(
     assert response.json()["sources"][0]["published_date"] == expected
 
 
+def test_ranked_v2_rebinds_provider_normalized_source_query_to_signed_request() -> None:
+    payload = v2_payload(query="Help me search lachlan Chen", mode="web", limit=1)
+    with TestClient(app) as client:
+        manager = client.app.state.research
+
+        async def search(query: str, mode: str, limit: int) -> SearchOutcome:
+            normalized = source(
+                "https://example.com/lachlan",
+                provider="wikipedia",
+                query="Help search lachlan Chen",
+            )
+            normalized.kind = "web"
+            return SearchOutcome(query=query, mode=mode, sources=[normalized], providers=[])
+
+        manager.quick_search = search
+        response = client.post("/api/search/v2", json=payload)
+
+    assert response.status_code == 200
+    returned = response.json()["sources"][0]
+    assert returned["query"] == payload["query"]
+    assert returned["provenance"][0]["query"] == "Help search lachlan Chen"
+
+
 def test_ranked_allowed_domains_overfetches_before_filtering_and_truncating() -> None:
     payload = v2_payload(limit=1, allowed_domains=["example.com"])
     with TestClient(app) as client:

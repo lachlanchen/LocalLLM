@@ -15,6 +15,8 @@ from localllm.research import (
     ResearchManager,
     ResearchSource,
     ResearchTask,
+    _comparison_anchor_terms,
+    _research_relevance_terms,
     _research_topic,
     _source_matches_research_topic,
 )
@@ -316,6 +318,71 @@ async def test_query_planning_removes_agent_wrapper_and_splits_comparison(
         "the official SQLite documentation about WAL mode versus rollback journaling."
     )
     assert queries == ["SQLite WAL mode", "SQLite rollback journaling"]
+
+
+@pytest.mark.asyncio
+async def test_query_planning_removes_separate_activation_and_output_sentences(
+    tmp_path: Path,
+) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("natural-comparison")
+    task.question = (
+        "Perform standard deep research using both current web sources and scholarly papers. "
+        "Compare SQLite WAL mode with rollback-journal mode for a local-first agent database "
+        "that has concurrent readers, one writer, crash recovery, backups, and occasional "
+        "network-filesystem access. Explain the tradeoffs and limitations, distinguish facts "
+        "from recommendations, use multiple authoritative sources, and cite every substantive "
+        "claim. Finish the complete evidence-grounded report in this turn."
+    )
+    task.mode = "both"
+    task.depth = "standard"
+
+    queries = await manager._plan_queries(task)
+
+    assert _research_topic(task.question) == (
+        "Compare SQLite WAL mode with rollback-journal mode for a local-first agent database "
+        "that has concurrent readers, one writer, crash recovery, backups, and occasional "
+        "network-filesystem access."
+    )
+    assert len(queries) == 2
+    assert all("SQLite" in query and "WAL" in query and "rollback-journal" in query for query in queries)
+    assert all("deep research" not in query and "cite" not in query for query in queries)
+    assert queries[0].startswith("SQLite WAL mode rollback-journal mode")
+    assert queries[1].startswith("rollback-journal mode SQLite WAL mode")
+
+
+def test_research_relevance_ignores_instruction_vocabulary() -> None:
+    topic = "Compare SQLite WAL mode with rollback journaling for a local-first agent database"
+    terms = _research_relevance_terms(topic)
+    anchors = _comparison_anchor_terms(topic)
+
+    assert _source_matches_research_topic(
+        ResearchSource(
+            "SQLite: Write-Ahead Logging",
+            "https://sqlite.org/wal.html",
+            "WAL differs from rollback journaling for SQLite databases.",
+        ),
+        terms,
+        anchors,
+    )
+    assert not _source_matches_research_topic(
+        ResearchSource(
+            "Research methods for autonomous agents",
+            "https://example.com/research-agents",
+            "A scholarly paper comparing evidence and recommendations.",
+        ),
+        terms,
+        anchors,
+    )
+    assert not _source_matches_research_topic(
+        ResearchSource(
+            "Concurrent rollback for crash recovery in extended networks",
+            "https://example.com/concurrent-rollback",
+            "A database network can recover after a writer crash.",
+        ),
+        terms,
+        anchors,
+    )
 
 
 def test_research_relevance_requires_exact_topic_tokens() -> None:

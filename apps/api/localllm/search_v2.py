@@ -790,6 +790,7 @@ class _EnrichedSource:
 
 def _enrich_source(
     source: ResearchSource,
+    request_query: str,
     allowed_domains: Sequence[str],
     requested_identifiers: Sequence[ExactIdentifierV2],
 ) -> _EnrichedSource | None:
@@ -805,6 +806,10 @@ def _enrich_source(
     identity_digest = compute_source_identity_digest(canonical_url, domain, identifiers)
     public = source.public_dict()
     public["url"] = canonical_url
+    # Provider adapters may normalize stop words or punctuation in the query
+    # they retain on an individual result.  The v2 public source belongs to the
+    # signed request, while the actual provider query remains in provenance.
+    public["query"] = request_query
     public["published_date"] = canonical_published_date(source.published_date)
     public["doi"] = next(
         (identifier["value"] for identifier in identifiers if identifier["kind"] == "doi"),
@@ -1134,6 +1139,7 @@ async def execute_search_v2(manager: Any, payload: SearchRequestV2) -> SearchRes
             if (
                 wrapped := _enrich_source(
                     source,
+                    payload.query,
                     constraints.allowed_domains,
                     constraints.exact_identifiers,
                 )
