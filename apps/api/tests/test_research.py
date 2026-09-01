@@ -15,6 +15,8 @@ from localllm.research import (
     ResearchManager,
     ResearchSource,
     ResearchTask,
+    _research_topic,
+    _source_matches_research_topic,
 )
 from localllm.search import ProviderDiagnostic, SearchOutcome
 
@@ -291,6 +293,218 @@ async def test_query_planning_is_deterministic_and_model_independent(tmp_path: P
         "How reliable is retrieval-grounded generation? systematic review",
         "How reliable is retrieval-grounded generation? methods results",
     ]
+
+
+@pytest.mark.asyncio
+async def test_query_planning_removes_agent_wrapper_and_splits_comparison(
+    tmp_path: Path,
+) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("comparison")
+    task.question = (
+        "Run quick deep research, not ordinary search, on the official SQLite "
+        "documentation about WAL mode versus rollback journaling. Produce a concise "
+        "comparison supported by at least two verified sources and numbered citations. "
+        "Do not run code and do not create files."
+    )
+    task.mode = "web"
+    task.depth = "quick"
+
+    queries = await manager._plan_queries(task)
+
+    assert _research_topic(task.question) == (
+        "the official SQLite documentation about WAL mode versus rollback journaling."
+    )
+    assert queries == ["SQLite WAL mode", "SQLite rollback journaling"]
+
+
+def test_research_relevance_requires_exact_topic_tokens() -> None:
+    terms = {"sqlite", "wal", "rollback", "journaling"}
+
+    assert _source_matches_research_topic(
+        ResearchSource(
+            "SQLite: Write-Ahead Logging",
+            "https://sqlite.org/wal.html",
+            "WAL differs from rollback journaling.",
+        ),
+        terms,
+    )
+    assert not _source_matches_research_topic(
+        ResearchSource(
+            "Wallpaper manager",
+            "https://example.com/wallpaper",
+            "Run a beautiful desktop agent.",
+        ),
+        terms,
+    )
+
+
+@pytest.mark.asyncio
+async def test_official_document_request_expands_only_validated_entity_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("official-host")
+    task.question = (
+        "Run quick deep research on the official SQLite documentation about "
+        "WAL mode versus rollback journaling."
+    )
+    task.mode = "web"
+    task.depth = "quick"
+    task.queries = ["SQLite WAL mode", "SQLite rollback journaling"]
+    calls: list[tuple[str, str, int]] = []
+
+    async def quick(query: str, mode: str, limit: int) -> SearchOutcome:
+        calls.append((query, mode, limit))
+        if query == "SQLite WAL mode":
+            sources = [
+                ResearchSource(
+                    "Write-Ahead Logging",
+                    "https://www.sqlite.org/wal.html",
+                    "SQLite WAL mode documentation.",
+                    provider="test",
+                    providers=["test"],
+                ),
+                ResearchSource(
+                    "Unrelated wallpaper",
+                    "https://sqlite.evil.example/wallpaper",
+                    "Wallpaper mode.",
+                    provider="test",
+                    providers=["test"],
+                ),
+            ]
+        elif query.startswith("site:www.sqlite.org "):
+            sources = [
+                ResearchSource(
+                    "SQLite forum discussion",
+                    "https://www.sqlite.org/forum/post/123",
+                    "General user conversation.",
+                    provider="test",
+                    providers=["test"],
+                )
+            ]
+        else:
+            sources = []
+        return SearchOutcome(
+            query,
+            "web",
+            sources,
+            [ProviderDiagnostic("test", "web", True, len(sources), 1, queries=[query])],
+        )
+
+    async def discover(
+        topic: str,
+        hostname: str,
+        _seed_sources: list[ResearchSource],
+        limit: int,
+    ) -> tuple[list[ResearchSource], ProviderDiagnostic]:
+        assert topic.endswith("WAL mode versus rollback journaling.")
+        assert hostname == "www.sqlite.org"
+        assert limit == 6
+        source = ResearchSource(
+            "Atomic Commit In SQLite",
+            "https://www.sqlite.org/atomiccommit.html",
+            "SQLite rollback journal behavior.",
+            provider="site_docs",
+            providers=["site_docs"],
+        )
+        return [source], ProviderDiagnostic(
+            "site_docs", "web", True, 1, 1, queries=[topic]
+        )
+
+    monkeypatch.setattr(manager, "quick_search", quick)
+    monkeypatch.setattr(manager, "_discover_same_host_documents", discover)
+
+    sources, diagnostics = await manager._search_sources(task)
+
+    assert [query for query, _mode, _limit in calls] == [
+        "SQLite WAL mode",
+        "SQLite rollback journaling",
+        "site:www.sqlite.org SQLite WAL mode",
+        "site:www.sqlite.org SQLite rollback journaling",
+    ]
+    assert all(mode == "web" for _query, mode, _limit in calls)
+    assert all(source.url.startswith("https://www.sqlite.org/") for source in sources)
+    assert {source.title for source in sources} == {
+        "Write-Ahead Logging",
+        "Atomic Commit In SQLite",
+    }
+    assert diagnostics[0].queries == [query for query, _mode, _limit in calls]
+
+
+@pytest.mark.asyncio
+async def test_same_host_document_discovery_is_bounded_relevant_and_https_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = make_manager(tmp_path)
+    pages = {
+        "https://www.sqlite.org/": (
+            '<a href="docs.html">Documentation</a>'
+            '<a href="https://evil.example/wal.html">SQLite WAL guide</a>'
+            '<a href="http://www.sqlite.org/insecure.html">SQLite rollback</a>'
+        ),
+        "https://www.sqlite.org/wal.html": (
+            '<a href="lockingv3.html#rollback">rollback journal</a>'
+        ),
+        "https://www.sqlite.org/docs.html": (
+            '<a href="wal.html">WAL mode</a>'
+            '<a href="atomiccommit.html">atomic commit and rollback</a>'
+            '<a href="download.html">SQLite WAL download</a>'
+        ),
+        "https://www.sqlite.org/lockingv3.html": "<p>locking documentation</p>",
+        "https://www.sqlite.org/atomiccommit.html": "<p>atomic commit documentation</p>",
+    }
+    requested: list[str] = []
+
+    async def response(_client: httpx.AsyncClient, url: str) -> httpx.Response | None:
+        requested.append(url)
+        page = pages.get(url)
+        if page is None:
+            return None
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            text=page,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(ResearchManager, "_get_pinned_response", response)
+    sources, diagnostic = await manager._discover_same_host_documents(
+        "the official SQLite documentation about WAL mode versus rollback journaling.",
+        "www.sqlite.org",
+        [
+            ResearchSource(
+                "Write-Ahead Logging",
+                "https://www.sqlite.org/wal.html",
+                "SQLite WAL documentation.",
+            )
+        ],
+        limit=6,
+    )
+
+    assert {source.url for source in sources} == {
+        "https://www.sqlite.org/lockingv3.html",
+        "https://www.sqlite.org/atomiccommit.html",
+    }
+    assert all(source.provider == "site_docs" for source in sources)
+    assert diagnostic is not None
+    assert diagnostic.result_count == 2
+    assert "https://evil.example/wal.html" not in requested
+    assert "http://www.sqlite.org/insecure.html" not in requested
+    assert len(requested) <= 5
+
+
+def test_research_retains_and_renumbers_only_cited_sources() -> None:
+    sources = [
+        ResearchSource(f"Source {index}", f"https://example.com/{index}", "evidence")
+        for index in range(1, 4)
+    ]
+    report = "# Research Report\n\n## Findings\n\nSupported by later items. [2][3]"
+
+    normalized, retained = ResearchManager._retain_cited_sources(report, sources)
+
+    assert normalized.endswith("[1][2]")
+    assert [source.title for source in retained] == ["Source 2", "Source 3"]
 
 
 @pytest.mark.asyncio

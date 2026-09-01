@@ -235,6 +235,24 @@ def test_provider_metadata_numbers_and_record_arrays_are_bounded() -> None:
     )
 
 
+def test_ranking_uses_exact_tokens_instead_of_substring_matches() -> None:
+    relevant = source(
+        "SQLite WAL documentation",
+        "https://sqlite.org/wal.html",
+        "hacker_news_algolia",
+    )
+    substring_only = source(
+        "Wallpaper manager",
+        "https://example.com/wallpaper",
+        "github_repositories",
+    )
+
+    ranked = FederatedSearch._rank("SQLite WAL", [substring_only, relevant])
+
+    assert ranked[0] is relevant
+    assert relevant.score > substring_only.score
+
+
 def test_structured_query_removes_chat_formatting_instructions() -> None:
     assert (
         _structured_keyword_query(

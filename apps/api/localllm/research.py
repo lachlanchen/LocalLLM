@@ -9,6 +9,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote, urljoin, urlparse, urlunparse
 
@@ -24,11 +25,146 @@ from .search import (
     ResearchSource,
     SearchMode,
     SearchOutcome,
+    _lexical_tokens,
+    _structured_keyword_query,
     canonical_published_date,
 )
 
 ResearchDepth = Literal["quick", "standard", "deep"]
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="localllm-dns")
+_RESEARCH_WRAPPER_PREFIX = re.compile(
+    r"^(?:please\s+)?(?:run|perform|conduct|do|start)\s+"
+    r"[^.!?]{0,120}?\b(?:deep\s+research|research|investigation|review)\b"
+    r"(?:\s*,?\s*not[^.!?]{0,40}\bsearch\b)?\s*,?\s*"
+    r"(?:on|about|into|regarding|for)\s+",
+    flags=re.IGNORECASE,
+)
+_RESEARCH_OUTPUT_SENTENCE = re.compile(
+    r"^(?:please\s+)?(?:produce|return|reply|respond|format|write|create|save|"
+    r"include|cite|support|provide)\b|^(?:do\s+not|don't|dont|never|avoid|skip)\b",
+    flags=re.IGNORECASE,
+)
+_COMPARISON_TOPIC = re.compile(
+    r"^(?P<context>.+?)\b(?:about|on|regarding)\s+"
+    r"(?P<left>.+?)\s+(?:versus|vs\.?|compared\s+(?:with|to))\s+(?P<right>.+)$",
+    flags=re.IGNORECASE,
+)
+_RESEARCH_CONTEXT_STOPWORDS = {
+    "the", "official", "docs", "documentation", "document", "documents", "website", "site"
+}
+_RESEARCH_RELEVANCE_STOPWORDS = {
+    "about", "against", "comparison", "compared", "documentation", "docs", "evidence",
+    "official", "mode", "modes", "research", "review", "site", "sources", "versus", "website",
+}
+_DOCUMENT_NAVIGATION_TERMS = {
+    "api", "developer", "developers", "docs", "documentation", "guide", "guides",
+    "manual", "reference", "references", "spec", "specification",
+}
+_DOCUMENT_LINK_BLOCKLIST = {
+    "account", "auth", "download", "downloads", "login", "logout", "search", "signin",
+    "signup", "subscribe",
+}
+_NON_DOCUMENT_PATH_TERMS = {
+    "blog", "community", "discussion", "discussions", "forum", "forums", "news", "post",
+    "posts", "question", "questions",
+}
+
+
+class _BoundedLinkCollector(HTMLParser):
+    """Collect a small number of ordinary links without executing page content."""
+
+    def __init__(self, limit: int = 256):
+        super().__init__(convert_charrefs=True)
+        self.limit = limit
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() != "a" or len(self.links) >= self.limit or self._href is not None:
+            return
+        href = next((value for key, value in attrs if key.casefold() == "href"), None)
+        if isinstance(href, str):
+            self._href = href
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None and sum(map(len, self._text)) < 500:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() != "a" or self._href is None:
+            return
+        text = re.sub(r"\s+", " ", " ".join(self._text)).strip()[:300]
+        self.links.append((self._href, text))
+        self._href = None
+        self._text = []
+
+
+def _research_topic(question: str) -> str:
+    """Remove activation and output-format prose before sending a search query."""
+
+    normalized = re.sub(r"\s+", " ", redact_url_tokens(question)).strip()[:800]
+    sentences = re.split(r"(?<=[.!?。！？])\s+", normalized)
+    selected: list[str] = []
+    for index, sentence in enumerate(sentences):
+        candidate = sentence.strip()
+        if index == 0:
+            candidate = _RESEARCH_WRAPPER_PREFIX.sub("", candidate, count=1).strip()
+        if selected and _RESEARCH_OUTPUT_SENTENCE.match(candidate):
+            continue
+        if candidate:
+            selected.append(candidate)
+    topic = " ".join(selected).strip()
+    return topic if len(topic) >= 3 else (normalized or "public evidence")
+
+
+def _comparison_queries(topic: str) -> list[str]:
+    """Split an explicit comparison into one bounded query for each side."""
+
+    match = _COMPARISON_TOPIC.match(topic.rstrip(" .?!。！？"))
+    if match is None:
+        return []
+    context_tokens = [
+        token
+        for token in re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", match.group("context"), re.UNICODE)
+        if len(token) > 1 and token.casefold() not in _RESEARCH_CONTEXT_STOPWORDS
+    ]
+    context = " ".join(context_tokens[-6:])
+    left = _structured_keyword_query(match.group("left"))
+    right = _structured_keyword_query(match.group("right"))
+    if not context or not left or not right:
+        return []
+    return [f"{context} {left}"[:800], f"{context} {right}"[:800]]
+
+
+def _research_relevance_terms(topic: str) -> set[str]:
+    return _lexical_tokens(_structured_keyword_query(topic)) - _RESEARCH_RELEVANCE_STOPWORDS
+
+
+def _source_matches_research_topic(source: ResearchSource, terms: set[str]) -> bool:
+    if not terms:
+        return True
+    source_terms = _lexical_tokens(f"{source.title} {source.snippet} {source.url}")
+    required = 2 if len(terms) >= 3 else 1
+    return len(terms & source_terms) >= required
+
+
+def _official_entity_terms(topic: str) -> set[str]:
+    match = re.search(
+        r"\bofficial\s+([A-Za-z0-9][A-Za-z0-9.+#-]{1,63})\s+"
+        r"(?:docs?|documentation|website|site)\b",
+        topic,
+        flags=re.IGNORECASE,
+    )
+    return {match.group(1).casefold()} if match else set()
+
+
+def _is_entity_named_host(hostname: str, entities: set[str]) -> bool:
+    """Accept a conservative entity-owned host shape, not an arbitrary subdomain label."""
+
+    labels = hostname.casefold().rstrip(".").split(".")
+    return len(labels) >= 2 and labels[-2] in entities
 
 
 @dataclass
@@ -337,17 +473,207 @@ class ResearchManager:
     async def _plan_queries(self, task: ResearchTask) -> list[str]:
         """Build stable query variants without depending on model tool-call reliability."""
 
-        question = re.sub(r"\s+", " ", redact_url_tokens(task.question)).strip()[:800]
-        if len(question) < 3:
-            question = "public evidence"
+        question = _research_topic(task.question)
+        comparison = _comparison_queries(question)
         if task.mode == "web":
             variants = [question, f"{question} official documentation", f"{question} evidence"]
         elif task.mode == "papers":
             variants = [question, f"{question} systematic review", f"{question} methods results"]
         else:
             variants = [question, f"{question} official evidence", f"{question} research review"]
+        if comparison:
+            variants = [*comparison, *variants]
         count: dict[ResearchDepth, int] = {"quick": 1, "standard": 2, "deep": 3}
+        if comparison and task.depth == "quick":
+            count["quick"] = 2
         return list(dict.fromkeys(variants))[: count[task.depth]]
+
+    @staticmethod
+    def _same_host_document_link(base_url: str, href: str, hostname: str) -> str:
+        """Normalize one passive same-host documentation link."""
+
+        try:
+            parsed = urlparse(urljoin(base_url, href.strip()))
+            port = parsed.port
+        except (AttributeError, ValueError):
+            return ""
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").casefold().rstrip(".") != hostname
+            or parsed.username
+            or parsed.password
+            or port not in {None, 443}
+        ):
+            return ""
+        path = re.sub(r"/{2,}", "/", parsed.path or "/")
+        suffix = path.rsplit("/", 1)[-1]
+        if "." in suffix and not suffix.casefold().endswith((".htm", ".html")):
+            return ""
+        link_terms = _lexical_tokens(f"{path} {parsed.query}")
+        if link_terms & _DOCUMENT_LINK_BLOCKLIST:
+            return ""
+        # Documentation discovery never needs user-specific query state. Dropping
+        # it also prevents a site from reflecting credentials into retained URLs.
+        normalized = urlunparse(parsed._replace(path=path, query="", fragment=""))
+        return normalized if len(normalized) <= 2_048 else ""
+
+    @classmethod
+    async def _read_discovery_html(
+        cls,
+        client: httpx.AsyncClient,
+        url: str,
+        hostname: str,
+    ) -> tuple[str, str]:
+        """Read one small same-host HTML page through the pinned SSRF-safe transport."""
+
+        current_url = url
+        for _redirect in range(3):
+            response = await cls._get_pinned_response(client, current_url)
+            if response is None:
+                return "", ""
+            try:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        return "", ""
+                    redirected = cls._same_host_document_link(current_url, location, hostname)
+                    if not redirected:
+                        return "", ""
+                    current_url = redirected
+                    continue
+                response.raise_for_status()
+                if response.headers.get("content-encoding", "identity").casefold() not in {
+                    "",
+                    "identity",
+                }:
+                    return "", ""
+                media_type = response.headers.get("content-type", "").split(";", 1)[0].casefold()
+                if media_type not in {"text/html", "application/xhtml+xml"}:
+                    return "", ""
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > 512_000:
+                            return "", ""
+                    except ValueError:
+                        pass
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > 512_000:
+                        return "", ""
+                    body.extend(chunk)
+                encoding = response.encoding or "utf-8"
+                return current_url, bytes(body).decode(encoding, errors="replace")
+            finally:
+                await response.aclose()
+        return "", ""
+
+    async def _discover_same_host_documents(
+        self,
+        topic: str,
+        hostname: str,
+        seed_sources: list[ResearchSource],
+        limit: int = 6,
+    ) -> tuple[list[ResearchSource], ProviderDiagnostic | None]:
+        """Boundedly discover relevant documentation linked by an entity-named host."""
+
+        origin = f"https://{hostname}/"
+        frontier = [origin]
+        frontier.extend(
+            source.url
+            for source in seed_sources
+            if (urlparse(source.url).hostname or "").casefold().rstrip(".") == hostname
+        )
+        # The site root plus one search seed leave room in the five-page budget
+        # for the site's own documentation index and one relevant child page.
+        frontier = list(dict.fromkeys(frontier))[:2]
+        seen_pages: set[str] = set()
+        seen_links: set[str] = {source.url for source in seed_sources}
+        results: list[ResearchSource] = []
+        topic_terms = _research_relevance_terms(topic)
+        started = time.monotonic()
+        limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
+        headers = {"User-Agent": "LocalLLM-Research/0.1 (+local research assistant)"}
+        async with httpx.AsyncClient(
+            timeout=8.0,
+            headers=headers,
+            limits=limits,
+            trust_env=False,
+        ) as client:
+            while frontier and len(seen_pages) < 5 and len(results) < limit:
+                page_url = frontier.pop(0)
+                if page_url in seen_pages:
+                    continue
+                seen_pages.add(page_url)
+                try:
+                    final_url, page = await asyncio.wait_for(
+                        self._read_discovery_html(client, page_url, hostname), timeout=10.0
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                if not page:
+                    continue
+                collector = _BoundedLinkCollector()
+                try:
+                    collector.feed(page)
+                except Exception:
+                    continue
+                next_relevant_pages: list[str] = []
+                next_navigation_pages: list[str] = []
+                for href, anchor in collector.links:
+                    link = self._same_host_document_link(final_url, href, hostname)
+                    if not link or link in seen_links:
+                        continue
+                    link_terms = _lexical_tokens(f"{hostname} {link} {anchor}")
+                    overlap = topic_terms & link_terms
+                    is_relevant = len(overlap) >= (2 if len(topic_terms) >= 3 else 1)
+                    is_navigation = bool(link_terms & _DOCUMENT_NAVIGATION_TERMS)
+                    if not (is_relevant or is_navigation):
+                        continue
+                    # Do not let an early generic anchor suppress a later,
+                    # topic-specific anchor to the same document.
+                    seen_links.add(link)
+                    if is_relevant:
+                        title = anchor or link.rstrip("/").rsplit("/", 1)[-1]
+                        results.append(
+                            ResearchSource(
+                                title=title[:300],
+                                url=link,
+                                snippet="Same-site documentation relevant to the requested topic.",
+                                provider="site_docs",
+                                providers=["site_docs"],
+                                kind="web",
+                                query=topic[:800],
+                                provenance=[
+                                    {
+                                        "provider": "site_docs",
+                                        "kind": "web",
+                                        "query": topic[:800],
+                                        "provider_rank": len(results) + 1,
+                                    }
+                                ],
+                            )
+                        )
+                    if link not in seen_pages:
+                        if is_relevant:
+                            next_relevant_pages.append(link)
+                        else:
+                            next_navigation_pages.append(link)
+                    if len(results) >= limit:
+                        break
+                # Follow the current site's relevant/documentation links before
+                # falling back to search-result pages, which are often forums.
+                frontier = list(
+                    dict.fromkeys([*next_relevant_pages, *next_navigation_pages, *frontier])
+                )
+        if results:
+            duration_ms = max(1, int((time.monotonic() - started) * 1_000))
+            return results, ProviderDiagnostic(
+                "site_docs", "web", True, len(results), duration_ms, queries=[topic[:800]]
+            )
+        return [], None
 
     async def _search_sources(
         self, task: ResearchTask
@@ -359,10 +685,63 @@ class ResearchManager:
             outcome = await self.quick_search(query, task.mode, per_query)
             collected.extend(outcome.sources)
             diagnostics.extend(outcome.providers)
+        topic = _research_topic(task.question)
+        official_entities = _official_entity_terms(topic)
+        if official_entities and task.mode in {"web", "both"}:
+            # Once federation has returned an entity-named host, use the already
+            # public-URL-validated host as a bounded search scope. This makes an
+            # explicit request for official documentation resistant to noisy
+            # general results without maintaining a product/domain allowlist.
+            official_hosts: list[str] = []
+            for source in collected:
+                hostname = (urlparse(source.url).hostname or "").casefold().rstrip(".")
+                if hostname and _is_entity_named_host(hostname, official_entities):
+                    official_hosts.append(hostname)
+            official_hosts = list(dict.fromkeys(official_hosts))[:2]
+            scoped_queries = [
+                f"site:{hostname} {query}"[:800]
+                for hostname in official_hosts
+                for query in task.queries[:2]
+            ][:4]
+            for query in scoped_queries:
+                outcome = await self.quick_search(query, "web", per_query)
+                collected.extend(outcome.sources)
+                diagnostics.extend(outcome.providers)
+            for hostname in official_hosts:
+                credible_documents = {
+                    source.url
+                    for source in collected
+                    if (urlparse(source.url).hostname or "").casefold().rstrip(".") == hostname
+                    and not (
+                        _lexical_tokens(urlparse(source.url).path) & _NON_DOCUMENT_PATH_TERMS
+                    )
+                    and _source_matches_research_topic(
+                        source, _research_relevance_terms(topic)
+                    )
+                }
+                if len(credible_documents) >= 2:
+                    continue
+                discovered, site_diagnostic = await self._discover_same_host_documents(
+                    topic, hostname, collected, limit=min(6, task.max_sources)
+                )
+                collected.extend(discovered)
+                if site_diagnostic is not None:
+                    diagnostics.append(site_diagnostic)
         sources = self.search._deduplicate(collected)
-        sources = self.search._select_diverse(
-            self.search._rank(task.question, sources), task.mode, task.max_sources
-        )
+        relevance_terms = _research_relevance_terms(topic)
+        sources = [
+            source for source in sources if _source_matches_research_topic(source, relevance_terms)
+        ]
+        ranked = self.search._rank(" ".join(task.queries), sources)
+        if official_entities:
+            for source in ranked:
+                hostname = (urlparse(source.url).hostname or "").casefold().rstrip(".")
+                if _is_entity_named_host(hostname, official_entities):
+                    source.score = round(source.score + 2.0, 4)
+                if source.provider == "site_docs":
+                    source.score = round(source.score + 1.0, 4)
+            ranked.sort(key=lambda item: (-item.score, item.title.casefold(), item.url))
+        sources = self.search._select_diverse(ranked, task.mode, task.max_sources)
         combined: dict[tuple[str, str], ProviderDiagnostic] = {}
         for diagnostic in diagnostics:
             key = (diagnostic.name, diagnostic.kind)
@@ -752,6 +1131,32 @@ class ResearchManager:
         return True
 
     @classmethod
+    def _cited_source_indices(cls, report: str, source_count: int) -> list[int]:
+        body = re.split(cls.source_heading_pattern, report, maxsplit=1)[0]
+        return sorted(
+            {
+                int(value)
+                for value in re.findall(r"\[(\d+)]", body)
+                if 1 <= int(value) <= source_count
+            }
+        )
+
+    @classmethod
+    def _has_minimum_source_coverage(cls, report: str, source_count: int) -> bool:
+        required = min(2, source_count)
+        return len(cls._cited_source_indices(report, source_count)) >= required
+
+    @classmethod
+    def _retain_cited_sources(
+        cls, report: str, sources: list[ResearchSource]
+    ) -> tuple[str, list[ResearchSource]]:
+        cited = cls._cited_source_indices(report, len(sources))
+        mapping = {old: new for new, old in enumerate(cited, 1)}
+        body = re.split(cls.source_heading_pattern, report, maxsplit=1)[0].rstrip()
+        rewritten = re.sub(r"\[(\d+)]", lambda match: f"[{mapping[int(match.group(1))]}]", body)
+        return rewritten, [sources[index - 1] for index in cited]
+
+    @classmethod
     def _with_canonical_sources(cls, report: str, sources: list[ResearchSource]) -> str:
         """Replace a model-written source appendix with exact numbered Markdown links."""
         body = re.split(cls.source_heading_pattern, report, maxsplit=1)[0].rstrip()
@@ -1041,7 +1446,10 @@ class ResearchManager:
                 },
             ]
             task.report = await self._model_chat(task, messages)
-            if not self._citations_are_valid(task.report, len(task.sources)):
+            if not (
+                self._citations_are_valid(task.report, len(task.sources))
+                and self._has_minimum_source_coverage(task.report, len(task.sources))
+            ):
                 repair_messages = [
                     {
                         "role": "system",
@@ -1072,9 +1480,15 @@ class ResearchManager:
                     },
                 ]
                 task.report = await self._model_chat(task, repair_messages)
-                if not self._citations_are_valid(task.report, len(task.sources)):
+                if not (
+                    self._citations_are_valid(task.report, len(task.sources))
+                    and self._has_minimum_source_coverage(task.report, len(task.sources))
+                ):
                     salvaged = self._salvage_cited_report(task.report, len(task.sources))
-                    if not self._citations_are_valid(salvaged, len(task.sources)):
+                    if not (
+                        self._citations_are_valid(salvaged, len(task.sources))
+                        and self._has_minimum_source_coverage(salvaged, len(task.sources))
+                    ):
                         salvaged = self._evidence_inventory_fallback(len(task.sources))
                         if not self._citations_are_valid(salvaged, len(task.sources)):
                             raise RuntimeError(
@@ -1082,6 +1496,9 @@ class ResearchManager:
                             )
                         evidence_inventory_only = True
                     task.report = salvaged
+            task.report, task.sources = self._retain_cited_sources(task.report, task.sources)
+            if not self._citations_are_valid(task.report, len(task.sources)):
+                raise RuntimeError("The cited evidence set could not be normalized safely")
             task.report = self._with_canonical_sources(task.report, task.sources)
             task.status = "complete"
             task.stage = (

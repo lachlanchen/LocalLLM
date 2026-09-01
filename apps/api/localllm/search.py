@@ -276,6 +276,16 @@ def _structured_keyword_query(value: str) -> str:
     return " ".join(keywords[:24]) if len(keywords) >= 2 else normalized[:800]
 
 
+def _lexical_tokens(value: str) -> set[str]:
+    """Return exact Unicode word tokens for scoring, never substrings."""
+
+    return {
+        token
+        for token in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
+        if len(token) >= 3
+    }
+
+
 def _safe_year(value: object) -> int | None:
     match = re.search(r"\b(19\d{2}|20\d{2})\b", str(value or ""))
     if not match:
@@ -1556,18 +1566,17 @@ class FederatedSearch:
     @staticmethod
     def _rank(query: str, sources: list[ResearchSource]) -> list[ResearchSource]:
         lexical_query = _SITE_OPERATOR_RE.sub(" ", query)
-        terms = {
-            term
-            for term in re.findall(r"[\w-]{3,}", lexical_query.casefold(), flags=re.UNICODE)
-            if term not in {"what", "when", "where", "which", "with", "from", "that", "this"}
+        terms = _lexical_tokens(lexical_query) - {
+            "what", "when", "where", "which", "with", "from", "that", "this"
         }
         current_year = datetime.now(timezone.utc).year
         for source in sources:
             source.citation_count = _bounded_citation_count(source.citation_count)
             provider_names = source.providers or [source.provider]
-            haystack = f"{source.title} {source.snippet}".casefold()
-            overlap = sum(1 for term in terms if term in haystack) / max(1, len(terms))
-            title_overlap = sum(1 for term in terms if term in source.title.casefold())
+            haystack_terms = _lexical_tokens(f"{source.title} {source.snippet}")
+            title_terms = _lexical_tokens(source.title)
+            overlap = len(terms & haystack_terms) / max(1, len(terms))
+            title_overlap = len(terms & title_terms)
             citations = math.log1p(source.citation_count or 0) / 8.0
             provider_ranks = [
                 record.get("provider_rank")
