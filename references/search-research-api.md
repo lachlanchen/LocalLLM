@@ -347,6 +347,15 @@ old terminal objects to keep the in-memory cache at 32 whenever possible.
 - `GET /api/research/{task_id}` polls a task.
 - `DELETE /api/research/{task_id}` cancels a queued/running task and returns its
   serialized state.
+- Private brokers that require query-free exact routes use the authenticated
+  v2 forms instead: `POST /api/research/v2/create`,
+  `POST /api/research/v2/status`, and `POST /api/research/v2/cancel`. Create
+  accepts the same research document; status and cancel accept only
+  `{"task_id":"<12 lowercase hex>"}`. Every response is wrapped as
+  `{"schema":"localllm/research-task/v2","task":{...}}`. These routes use
+  the same bearer credential as `/api/search/v2`, reject extra fields, and keep
+  the task identifier out of URLs and query strings so an exact-path LazyEdge
+  role can expose them without adding wildcard routing.
 - Task states are `queued`, `running`, `complete`, `failed`, or `cancelled`.
   A task is first persisted under `data/research/` after it acquires the single
   run slot; a still-waiting queued task is memory-only. Progress and terminal

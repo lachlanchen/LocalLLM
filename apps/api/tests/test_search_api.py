@@ -611,3 +611,101 @@ def test_research_request_forwards_deterministic_mode_and_depth() -> None:
     }
     assert response.json()["mode"] == "papers"
     assert response.json()["depth"] == "deep"
+
+
+def test_research_v2_exact_routes_require_auth_and_wrap_task_state() -> None:
+    with configured_search_auth(), TestClient(app) as client:
+        manager = client.app.state.research
+        task = ResearchTask(
+            id="cafebabefeed",
+            question="What does the evidence establish?",
+            model="localllm-deep",
+            mode="both",
+            depth="standard",
+        )
+        captured: list[tuple[object, ...]] = []
+
+        def create(question: str, model: str, mode: str, depth: str) -> ResearchTask:
+            captured.append(("create", question, model, mode, depth))
+            return task
+
+        def get(task_id: str) -> ResearchTask | None:
+            captured.append(("get", task_id))
+            return task if task_id == task.id else None
+
+        async def cancel(task_id: str) -> ResearchTask | None:
+            captured.append(("cancel", task_id))
+            task.status = "cancelled"
+            return task if task_id == task.id else None
+
+        manager.create = create
+        manager.get = get
+        manager.cancel = cancel
+        headers = {"Authorization": f"Bearer {SEARCH_API_KEY}"}
+
+        unauthenticated = client.post(
+            "/api/research/v2/create",
+            json={"question": task.question},
+        )
+        created = client.post(
+            "/api/research/v2/create",
+            headers=headers,
+            json={
+                "question": task.question,
+                "model": "localllm-deep",
+                "mode": "both",
+                "depth": "standard",
+            },
+        )
+        status = client.post(
+            "/api/research/v2/status",
+            headers=headers,
+            json={"task_id": task.id},
+        )
+        cancelled = client.post(
+            "/api/research/v2/cancel",
+            headers=headers,
+            json={"task_id": task.id},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert created.status_code == 202
+    assert status.status_code == 200
+    assert cancelled.status_code == 200
+    assert created.json()["schema"] == "localllm/research-task/v2"
+    assert created.json()["task"]["id"] == task.id
+    assert status.json()["task"]["status"] == "queued"
+    assert cancelled.json()["task"]["status"] == "cancelled"
+    assert captured == [
+        ("create", task.question, "localllm-deep", "both", "standard"),
+        ("get", task.id),
+        ("cancel", task.id),
+    ]
+
+
+def test_research_v2_selectors_are_exact_bounded_and_fail_closed() -> None:
+    with configured_search_auth(), TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {SEARCH_API_KEY}"}
+        invalid = client.post(
+            "/api/research/v2/status",
+            headers=headers,
+            json={"task_id": "../research", "extra": "not accepted"},
+        )
+        oversized = client.post(
+            "/api/research/v2/cancel",
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Content-Length": "4096",
+            },
+            content=b"{}",
+        )
+        missing = client.post(
+            "/api/research/v2/status",
+            headers=headers,
+            json={"task_id": "deadbeefcafe"},
+        )
+
+    assert invalid.status_code == 422
+    assert oversized.status_code == 413
+    assert missing.status_code == 404

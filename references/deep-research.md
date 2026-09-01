@@ -31,6 +31,12 @@ synthesis, not whether search tools are invoked correctly.
    The prompt permits headings, paragraphs, and list items only. It requires factual units to end in an in-range citation cluster, tells the model to distinguish fact from inference, and asks it to write comparisons as “less than” or “greater than.” The validator and repair behavior are described below.
 6. **Persist**: save task state, progress, provider diagnostics, source metadata, and the report under `data/research/`. Directories use mode `0700` and task files use `0600`. Extracted page bodies are never returned by the task API or written into task JSON; they are cleared after synthesis.
 
+For authenticated private orchestration, the exact-path v2 protocol separates
+task creation, status polling, and cancellation into three query-free POST
+routes. The task runner and archive remain owned by LocalLLM; a remote agent or
+edge only receives the bounded public task envelope and never a filesystem path
+or extracted page body.
+
 ## Capacity and persistence limits
 
 The manager admits at most three queued/running tasks and executes only one

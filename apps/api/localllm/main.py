@@ -77,6 +77,10 @@ class ResearchRequest(StrictRequest):
     depth: Literal["quick", "standard", "deep"] = "standard"
 
 
+class ResearchTaskSelector(StrictRequest):
+    task_id: str = Field(pattern=r"^[0-9a-f]{12}$")
+
+
 class SearchRequest(StrictRequest):
     query: str = Field(min_length=3, max_length=800)
     mode: Literal["web", "papers", "both"] = "both"
@@ -149,6 +153,7 @@ RequestModel = TypeVar("RequestModel", bound=BaseModel)
 UpstreamResult = TypeVar("UpstreamResult")
 MAX_SEARCH_JSON_BYTES = 16 * 1024
 MAX_RESEARCH_JSON_BYTES = 32 * 1024
+MAX_RESEARCH_SELECTOR_JSON_BYTES = 1024
 MAX_OPENAI_JSON_BYTES = 25 * 1024 * 1024
 REQUEST_BODY_LIMITS = {
     "/api/agent/chat": MAX_OPENAI_JSON_BYTES,
@@ -163,6 +168,9 @@ REQUEST_BODY_LIMITS = {
     "/api/re/mcp/investigate": 32 * 1024,
     "/api/re/triage": 4 * 1024 * 1024,
     "/api/research": MAX_RESEARCH_JSON_BYTES,
+    "/api/research/v2/create": MAX_RESEARCH_JSON_BYTES,
+    "/api/research/v2/status": MAX_RESEARCH_SELECTOR_JSON_BYTES,
+    "/api/research/v2/cancel": MAX_RESEARCH_SELECTOR_JSON_BYTES,
     "/api/search": MAX_SEARCH_JSON_BYTES,
     "/api/search/v2": MAX_SEARCH_JSON_BYTES,
     "/api/speech/transcriptions": SPEECH_MULTIPART_REQUEST_BYTES,
@@ -1145,6 +1153,76 @@ async def cancel_research_task(
     if not task:
         raise HTTPException(status_code=404, detail="Research task not found")
     return manager.serialize(task)
+
+
+def _research_v2_response(manager: ResearchManager, task: Any) -> dict[str, Any]:
+    return {
+        "schema": "localllm/research-task/v2",
+        "task": manager.serialize(task),
+    }
+
+
+@app.post(
+    "/api/research/v2/create",
+    status_code=202,
+    dependencies=[Depends(require_search_api_key)],
+)
+async def create_research_v2(
+    request: Request, manager: ResearchManager = Depends(get_research)
+) -> dict[str, Any]:
+    """Create bounded research through an exact, privately authenticated route."""
+
+    payload = await _bounded_json_model(request, ResearchRequest, MAX_RESEARCH_JSON_BYTES)
+    try:
+        task = manager.create(
+            payload.question,
+            payload.model,
+            mode=payload.mode,
+            depth=payload.depth,
+        )
+    except ResearchCapacityError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return _research_v2_response(manager, task)
+
+
+@app.post(
+    "/api/research/v2/status",
+    dependencies=[Depends(require_search_api_key)],
+)
+async def get_research_task_v2(
+    request: Request, manager: ResearchManager = Depends(get_research)
+) -> dict[str, Any]:
+    """Read one task without putting its identifier in the URL."""
+
+    payload = await _bounded_json_model(
+        request,
+        ResearchTaskSelector,
+        MAX_RESEARCH_SELECTOR_JSON_BYTES,
+    )
+    task = manager.get(payload.task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Research task not found")
+    return _research_v2_response(manager, task)
+
+
+@app.post(
+    "/api/research/v2/cancel",
+    dependencies=[Depends(require_search_api_key)],
+)
+async def cancel_research_task_v2(
+    request: Request, manager: ResearchManager = Depends(get_research)
+) -> dict[str, Any]:
+    """Cancel one task through the same exact private route contract."""
+
+    payload = await _bounded_json_model(
+        request,
+        ResearchTaskSelector,
+        MAX_RESEARCH_SELECTOR_JSON_BYTES,
+    )
+    task = await manager.cancel(payload.task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Research task not found")
+    return _research_v2_response(manager, task)
 
 
 @app.get("/api/re/toolchain")
