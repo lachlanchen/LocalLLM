@@ -6,7 +6,7 @@ import re
 import stat
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -24,22 +24,25 @@ DEFAULT_REQUIRED_MODELS = (
 DEFAULT_NODE_CANARY_ROLES = ("text", "vision", "embedding")
 _NODE_CANARY_ROLES = frozenset({"text", "code", "vision", "embedding"})
 _SEARCH_CREDENTIAL_NAME = "localllm-search-api-key"
+_SPEECH_CREDENTIAL_NAME = "localllm-speech-api-key"
 
 
-def _systemd_search_credential(path: Path) -> bool:
+def _systemd_private_credential(path: Path, name: str, label: str) -> bool:
     directory_value = os.environ.get("CREDENTIALS_DIRECTORY")
     if directory_value is None:
         return False
     directory = Path(directory_value)
     if not directory.is_absolute():
         raise ValueError("Systemd credentials directory must be absolute")
-    expected = directory / _SEARCH_CREDENTIAL_NAME
+    expected = directory / name
     if path.parent == directory and path != expected:
-        raise ValueError("Search API key must use the fixed systemd credential name")
+        raise ValueError(f"{label} API key must use the fixed systemd credential name")
     return path == expected
 
 
-def _validate_search_key_metadata(entry: os.stat_result, *, systemd_managed: bool) -> None:
+def _validate_private_key_metadata(
+    entry: os.stat_result, *, systemd_managed: bool, label: str
+) -> None:
     common_valid = stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1
     owner_private = (
         entry.st_uid == os.getuid()
@@ -57,31 +60,35 @@ def _validate_search_key_metadata(entry: os.stat_result, *, systemd_managed: boo
     )
     if not common_valid or not (owner_private or systemd_private):
         raise ValueError(
-            "Search API key file must be one private regular file with an approved owner"
+            f"{label} API key file must be one private regular file with an approved owner"
         )
 
 
-def _read_private_search_key(path_value: object) -> SecretStr:
-    """Read one exact private search credential without following the final path."""
+def _validate_search_key_metadata(entry: os.stat_result, *, systemd_managed: bool) -> None:
+    _validate_private_key_metadata(entry, systemd_managed=systemd_managed, label="Search")
 
+
+def _read_private_application_key(
+    path_value: object, *, credential_name: str, label: str
+) -> SecretStr:
     try:
         path = Path(path_value)  # type: ignore[arg-type]
     except TypeError as exc:
-        raise ValueError("Search API key file must be an absolute private file") from exc
+        raise ValueError(f"{label} API key file must be an absolute private file") from exc
     if not path.is_absolute():
-        raise ValueError("Search API key file must be an absolute private file")
-    systemd_managed = _systemd_search_credential(path)
+        raise ValueError(f"{label} API key file must be an absolute private file")
+    systemd_managed = _systemd_private_credential(path, credential_name, label)
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise ValueError("Search API key file could not be opened safely") from exc
+        raise ValueError(f"{label} API key file could not be opened safely") from exc
     try:
         entry = os.fstat(descriptor)
-        _validate_search_key_metadata(entry, systemd_managed=systemd_managed)
+        _validate_private_key_metadata(entry, systemd_managed=systemd_managed, label=label)
         if entry.st_size < 1 or entry.st_size > 512:
-            raise ValueError("Search API key file must contain 1 to 512 bytes")
+            raise ValueError(f"{label} API key file must contain 1 to 512 bytes")
         chunks: list[bytes] = []
         size = 0
         while size <= 512:
@@ -92,7 +99,7 @@ def _read_private_search_key(path_value: object) -> SecretStr:
             size += len(chunk)
         payload = b"".join(chunks)
         if len(payload) < 1 or len(payload) > 512:
-            raise ValueError("Search API key file must contain 1 to 512 bytes")
+            raise ValueError(f"{label} API key file must contain 1 to 512 bytes")
         after = os.fstat(descriptor)
         before_identity = (
             entry.st_dev,
@@ -117,12 +124,30 @@ def _read_private_search_key(path_value: object) -> SecretStr:
             after.st_ctime_ns,
         )
         if before_identity != after_identity or len(payload) != entry.st_size:
-            raise ValueError("Search API key file changed while it was being read")
+            raise ValueError(f"{label} API key file changed while it was being read")
         if any(byte < 0x21 or byte > 0x7E for byte in payload):
-            raise ValueError("Search API key file must contain visible ASCII without whitespace")
+            raise ValueError(
+                f"{label} API key file must contain visible ASCII without whitespace"
+            )
         return SecretStr(payload.decode("ascii"))
     finally:
         os.close(descriptor)
+
+
+def _read_private_search_key(path_value: object) -> SecretStr:
+    """Read one exact private search credential without following the final path."""
+
+    return _read_private_application_key(
+        path_value, credential_name=_SEARCH_CREDENTIAL_NAME, label="Search"
+    )
+
+
+def _read_private_speech_key(path_value: object) -> SecretStr:
+    """Read one exact private speech credential without following the final path."""
+
+    return _read_private_application_key(
+        path_value, credential_name=_SPEECH_CREDENTIAL_NAME, label="Speech"
+    )
 
 
 def prepare_private_data_dir(path: Path) -> Path:
@@ -197,6 +222,21 @@ class Settings(BaseSettings):
     image_generation_enabled: bool = False
     image_generation_gpu: int = Field(default=0, ge=0, le=15)
     image_generation_timeout_seconds: int = Field(default=300, ge=60, le=900)
+
+    # Speech transcription is an optional local role. It reuses an operator-selected
+    # cached Faster-Whisper model through an isolated persistent worker and never
+    # makes model downloads at request time.
+    speech_enabled: bool = False
+    speech_model_path: Path | None = None
+    speech_python_path: Path = Path("/home/lachlan/miniconda3/envs/whisperx/bin/python")
+    speech_ffprobe_path: Path = Path("/usr/bin/ffprobe")
+    speech_device: Literal["cpu", "cuda"] = "cpu"
+    speech_device_index: int = Field(default=1, ge=0, le=15)
+    speech_compute_type: Literal["int8", "int8_float16", "float16", "float32"] = "int8"
+    speech_timeout_seconds: int = Field(default=180, ge=30, le=600)
+    speech_worker_start_timeout_seconds: int = Field(default=180, ge=30, le=600)
+    speech_api_key: SecretStr = SecretStr("")
+    speech_api_key_file: Path | None = None
 
     # Application authorization for the quick-search route is independent from both
     # the OpenAI-compatible API key and outbound provider credentials. Leaving this
@@ -290,6 +330,22 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("speech_api_key")
+    @classmethod
+    def validate_speech_api_key(cls, value: SecretStr) -> SecretStr:
+        candidate = value.get_secret_value()
+        if not candidate:
+            return value
+        try:
+            encoded = candidate.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Speech API key must use visible ASCII characters") from exc
+        if len(encoded) > 512 or any(byte < 0x21 or byte > 0x7E for byte in encoded):
+            raise ValueError(
+                "Speech API key must contain at most 512 visible ASCII characters without whitespace"
+            )
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def load_file_backed_search_api_key(cls, value: Any) -> Any:
@@ -299,6 +355,17 @@ class Settings(BaseSettings):
             raise ValueError("Search API key and Search API key file are mutually exclusive")
         loaded = dict(value)
         loaded["search_api_key"] = _read_private_search_key(value["search_api_key_file"])
+        return loaded
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_file_backed_speech_api_key(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("speech_api_key_file") is None:
+            return value
+        if "speech_api_key" in value:
+            raise ValueError("Speech API key and Speech API key file are mutually exclusive")
+        loaded = dict(value)
+        loaded["speech_api_key"] = _read_private_speech_key(value["speech_api_key_file"])
         return loaded
 
     @field_validator("ollama_base_url")
@@ -333,6 +400,16 @@ class Settings(BaseSettings):
         search_api_key = self.search_api_key.get_secret_value()
         if search_api_key and search_api_key == self.api_key:
             raise ValueError("Search API key must be distinct from the OpenAI-compatible API key")
+        speech_api_key = self.speech_api_key.get_secret_value()
+        if speech_api_key and speech_api_key in {self.api_key, search_api_key}:
+            raise ValueError("Speech API key must be distinct from other application API keys")
+        if self.speech_enabled:
+            if not speech_api_key:
+                raise ValueError("Enabled speech transcription requires a dedicated Speech API key")
+            if self.speech_model_path is None or not self.speech_model_path.is_absolute():
+                raise ValueError("Enabled speech transcription requires an absolute cached model path")
+            if not self.speech_python_path.is_absolute() or not self.speech_ffprobe_path.is_absolute():
+                raise ValueError("Speech worker executables must use absolute paths")
         if self.node_canary_receipt_path is not None:
             if not _IMMUTABLE_RELEASE_ID.fullmatch(self.release_id):
                 raise ValueError(

@@ -54,6 +54,11 @@ from .reverse_engineering import (
     re_toolchain_status,
 )
 from .search_v2 import SearchResponseV2, execute_search_v2, parse_search_v2_request
+from .speech import (
+    SPEECH_MULTIPART_REQUEST_BYTES,
+    SpeechTranscriptionManager,
+)
+from .speech import router as speech_router
 from .system import find_project_root, gpu_status, storage_status, tool_status
 
 
@@ -160,6 +165,7 @@ REQUEST_BODY_LIMITS = {
     "/api/research": MAX_RESEARCH_JSON_BYTES,
     "/api/search": MAX_SEARCH_JSON_BYTES,
     "/api/search/v2": MAX_SEARCH_JSON_BYTES,
+    "/api/speech/transcriptions": SPEECH_MULTIPART_REQUEST_BYTES,
     "/v1/chat/completions": MAX_OPENAI_JSON_BYTES,
     "/v1/embeddings": 8 * 1024 * 1024,
     "/v1/responses": MAX_OPENAI_JSON_BYTES,
@@ -531,12 +537,15 @@ async def lifespan(app: FastAPI):
     ollama = OllamaClient(settings)
     try:
         research = ResearchManager(settings)
+        speech = SpeechTranscriptionManager(settings)
         app.state.ollama = ollama
         app.state.research = research
+        app.state.speech = speech
         app.state.conversations = ConversationStore(settings.data_dir)
         try:
             yield
         finally:
+            await speech.close()
             await research.shutdown()
     finally:
         await ollama.aclose()
@@ -581,6 +590,7 @@ app.add_middleware(BrowserSecurityBoundaryMiddleware, allowed_origins=allowed_or
 app.include_router(grounded_chat_router)
 app.include_router(agent_runtime_router)
 app.include_router(image_generation_router)
+app.include_router(speech_router)
 
 
 def get_ollama(request: Request) -> OllamaClient:

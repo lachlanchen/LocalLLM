@@ -222,6 +222,65 @@ def test_search_provider_credentials_use_localllm_environment_namespace(
     assert settings.search_serpapi_api_key == "scholar-secret"
 
 
+def test_speech_role_is_disabled_and_cpu_isolated_by_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.speech_enabled is False
+    assert settings.speech_model_path is None
+    assert settings.speech_device == "cpu"
+    assert settings.speech_device_index == 1
+    assert settings.speech_api_key.get_secret_value() == ""
+
+
+def test_enabled_speech_requires_dedicated_key_and_absolute_cached_model(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Speech API key"):
+        Settings(speech_enabled=True, speech_model_path=tmp_path / "model", _env_file=None)
+    with pytest.raises(ValueError, match="absolute cached model"):
+        Settings(
+            speech_enabled=True,
+            speech_model_path="relative-model",
+            speech_api_key="speech-key",
+            _env_file=None,
+        )
+    with pytest.raises(ValueError, match="distinct"):
+        Settings(
+            speech_enabled=True,
+            speech_model_path=tmp_path / "model",
+            speech_api_key="local-dev-key",
+            _env_file=None,
+        )
+
+
+def test_speech_application_key_loads_from_private_file_and_stays_masked(
+    monkeypatch, tmp_path
+) -> None:
+    secret = "file-backed-speech-credential-0123456789"
+    credential = tmp_path / "localllm-speech-api-key"
+    credential.write_text(secret, encoding="ascii")
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOCALLLM_SPEECH_API_KEY_FILE", str(credential))
+
+    settings = Settings(_env_file=None)
+
+    assert settings.speech_api_key_file == credential
+    assert settings.speech_api_key.get_secret_value() == secret
+    assert secret not in repr(settings)
+    assert secret not in settings.model_dump_json()
+
+
+def test_speech_application_key_rejects_inline_and_file_ambiguity(
+    monkeypatch, tmp_path
+) -> None:
+    credential = tmp_path / "localllm-speech-api-key"
+    credential.write_text("file-speech-credential", encoding="ascii")
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOCALLLM_SPEECH_API_KEY", "inline-speech-credential")
+    monkeypatch.setenv("LOCALLLM_SPEECH_API_KEY_FILE", str(credential))
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Settings(_env_file=None)
+
+
 def test_search_application_key_uses_dedicated_environment_variable_and_stays_masked(
     monkeypatch,
 ) -> None:
