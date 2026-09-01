@@ -3,6 +3,7 @@ set -u
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ollama_bin="$project_root/.local/ollama/bin/ollama"
+user_systemctl="$project_root/scripts/systemctl-user.sh"
 
 printf 'LocalLLM root: %s\n' "$project_root"
 printf 'Disk:\n'
@@ -20,6 +21,10 @@ curl -sS http://127.0.0.1:8008/livez 2>&1 || true
 printf '\nReadiness: '
 curl -sS http://127.0.0.1:8008/readyz 2>&1 || true
 printf '\n'
+printf '\nUser services (canonical per-user bus):\n'
+"$user_systemctl" show \
+  --property=Id,ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestamp \
+  localllm-ollama.service localllm-api.service 2>&1 || true
 printf '\nReverse engineering:\n'
 [[ -x "$project_root/.local/opt/ghidra_12.0.3_PUBLIC/ghidraRun" ]] && echo "Ghidra ready"
 if [[ -x "$project_root/.venv-tools/bin/python" ]]; then
