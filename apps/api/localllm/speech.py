@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings, prepare_private_data_dir
@@ -339,7 +339,7 @@ async def speech_status(manager: SpeechTranscriptionManager = Depends(get_speech
 async def speech_transcription(
     request: Request,
     file: UploadFile = File(...),
-    language: str = "auto",
+    language: str = Form("auto"),
     manager: SpeechTranscriptionManager = Depends(get_speech),
 ) -> JSONResponse:
     if set(request.query_params) - {"language"}:

@@ -100,8 +100,9 @@ def test_speech_transcription_passes_only_bytes_media_type_and_language(tmp_path
     audio = b"\x00\x00\x00\x18ftypM4A "
 
     response = client.post(
-        "/api/speech/transcriptions?language=en",
+        "/api/speech/transcriptions",
         headers={"authorization": "Bearer speech-test-key"},
+        data={"language": "en"},
         files={"file": ("private-original-name.m4a", audio, "audio/mp4")},
     )
 
