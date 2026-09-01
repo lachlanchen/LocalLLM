@@ -10,7 +10,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -19,6 +19,19 @@ import httpx
 from .config import Settings
 
 SearchMode = Literal["web", "papers", "both"]
+_PUBLISHED_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def canonical_published_date(value: object) -> str | None:
+    """Keep only a real canonical calendar date at a public source boundary."""
+
+    if not isinstance(value, str) or _PUBLISHED_DATE_PATTERN.fullmatch(value) is None:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.isoformat() == value else None
 
 
 @dataclass

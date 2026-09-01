@@ -201,6 +201,44 @@ def make_task(task_id: str = "research-test") -> ResearchTask:
     )
 
 
+def test_research_serialization_canonicalizes_provider_dates(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    task = make_task("canonical-dates")
+    task.sources = [
+        ResearchSource(
+            "Canonical",
+            "https://example.com/canonical",
+            "",
+            published_date="2024-01-02",
+        ),
+        ResearchSource(
+            "Non-padded",
+            "https://example.com/non-padded",
+            "",
+            published_date="2022-5-16",
+        ),
+        ResearchSource(
+            "Timestamp",
+            "https://example.com/timestamp",
+            "",
+            published_date="2026-01-12T14:43:54Z",
+        ),
+    ]
+
+    payload = manager.serialize(task)
+
+    assert [source["published_date"] for source in payload["sources"]] == [
+        "2024-01-02",
+        None,
+        None,
+    ]
+    assert [source.published_date for source in task.sources] == [
+        "2024-01-02",
+        "2022-5-16",
+        "2026-01-12T14:43:54Z",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_deep_research_aggregates_provider_diagnostics_across_queries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

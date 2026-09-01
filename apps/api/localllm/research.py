@@ -18,7 +18,14 @@ import trafilatura
 from .catalog import resolve_model
 from .config import Settings
 from .query_privacy import redact_url_tokens
-from .search import FederatedSearch, ProviderDiagnostic, ResearchSource, SearchMode, SearchOutcome
+from .search import (
+    FederatedSearch,
+    ProviderDiagnostic,
+    ResearchSource,
+    SearchMode,
+    SearchOutcome,
+    canonical_published_date,
+)
 
 ResearchDepth = Literal["quick", "standard", "deep"]
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="localllm-dns")
@@ -272,6 +279,7 @@ class ResearchManager:
         payload = asdict(task)
         for source in payload["sources"]:
             source.pop("content", None)
+            source["published_date"] = canonical_published_date(source.get("published_date"))
         return payload
 
     def provider_status(self) -> dict[str, Any]:
