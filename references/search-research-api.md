@@ -355,7 +355,9 @@ old terminal objects to keep the in-memory cache at 32 whenever possible.
   `{"schema":"localllm/research-task/v2","task":{...}}`. These routes use
   the same bearer credential as `/api/search/v2`, reject extra fields, and keep
   the task identifier out of URLs and query strings so an exact-path LazyEdge
-  role can expose them without adding wildcard routing.
+  role can expose them without adding wildcard routing. Every response from
+  these three exact paths, including authentication, validation, capacity, and
+  internal errors, is `Cache-Control: no-store` and strips `Set-Cookie` fields.
 - Task states are `queued`, `running`, `complete`, `failed`, or `cancelled`.
   A task is first persisted under `data/research/` after it acquires the single
   run slot; a still-waiting queued task is memory-only. Progress and terminal

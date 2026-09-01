@@ -384,7 +384,7 @@ class BrowserSecurityBoundaryMiddleware:
 
 
 class SearchResponseSecurityMiddleware:
-    """Make every exact search response private, including outer 500 responses."""
+    """Make exact search/research responses private, including outer 500 responses."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -393,6 +393,9 @@ class SearchResponseSecurityMiddleware:
         if scope.get("type") != "http" or scope.get("path") not in {
             "/api/search",
             "/api/search/v2",
+            "/api/research/v2/create",
+            "/api/research/v2/status",
+            "/api/research/v2/cancel",
         }:
             await self.app(scope, receive, send)
             return

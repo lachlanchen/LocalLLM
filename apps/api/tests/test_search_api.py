@@ -672,6 +672,8 @@ def test_research_v2_exact_routes_require_auth_and_wrap_task_state() -> None:
     assert created.status_code == 202
     assert status.status_code == 200
     assert cancelled.status_code == 200
+    for response in (unauthenticated, created, status, cancelled):
+        assert_private_search_response(response)
     assert created.json()["schema"] == "localllm/research-task/v2"
     assert created.json()["task"]["id"] == task.id
     assert status.json()["task"]["status"] == "queued"
@@ -709,3 +711,5 @@ def test_research_v2_selectors_are_exact_bounded_and_fail_closed() -> None:
     assert invalid.status_code == 422
     assert oversized.status_code == 413
     assert missing.status_code == 404
+    for response in (invalid, oversized, missing):
+        assert_private_search_response(response)
