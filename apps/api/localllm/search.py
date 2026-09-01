@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import json
 import math
@@ -8,6 +9,7 @@ import re
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -126,6 +128,8 @@ MAX_CITATION_COUNT = 1_000_000_000_000
 MAX_PROVIDER_RECORDS = 20
 MAX_JSON_NUMBER_CHARS = 128
 DDGS_WORKER_MAX_OUTPUT_BYTES = 2_000_000
+SEARCH_CACHE_MAX_ENTRIES = 64
+SEARCH_CACHE_TTL_SECONDS = 120.0
 _STRUCTURED_QUERY_STOPWORDS = {
     "a",
     "an",
@@ -1373,6 +1377,9 @@ class FederatedSearch:
         self.settings = settings
         self._provider_semaphore = asyncio.Semaphore(settings.search_max_concurrency)
         self._validation_semaphore = asyncio.Semaphore(settings.search_max_concurrency)
+        self._search_cache: OrderedDict[
+            tuple[str, SearchMode, int, int], tuple[float, SearchOutcome]
+        ] = OrderedDict()
         self._general: list[SearchProvider] = []
         if settings.search_brave_api_key:
             self._general.append(BraveProvider(settings))
@@ -1760,6 +1767,15 @@ class FederatedSearch:
             if provider_candidate_limit is None
             else min(MAX_PROVIDER_RECORDS, max(1, provider_candidate_limit))
         )
+        cache_key = (query, mode, limit, per_provider_limit)
+        now = time.monotonic()
+        cached = self._search_cache.get(cache_key)
+        if cached is not None:
+            cached_at, outcome = cached
+            if now - cached_at <= SEARCH_CACHE_TTL_SECONDS:
+                self._search_cache.move_to_end(cache_key)
+                return copy.deepcopy(outcome)
+            del self._search_cache[cache_key]
         calls = [
             self._call_provider(provider, query, per_provider_limit, semaphore)
             for provider in providers
@@ -1839,4 +1855,10 @@ class FederatedSearch:
             warnings.append(prefix + ", ".join(failed))
         if not ranked:
             warnings.append("No usable public search results were returned")
-        return SearchOutcome(query, mode, ranked, diagnostics, warnings)
+        outcome = SearchOutcome(query, mode, ranked, diagnostics, warnings)
+        if ranked:
+            self._search_cache[cache_key] = (time.monotonic(), copy.deepcopy(outcome))
+            self._search_cache.move_to_end(cache_key)
+            while len(self._search_cache) > SEARCH_CACHE_MAX_ENTRIES:
+                self._search_cache.popitem(last=False)
+        return outcome

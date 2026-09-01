@@ -468,6 +468,33 @@ async def test_keyless_search_defers_rate_prone_second_wave_when_primary_is_suff
 
 
 @pytest.mark.asyncio
+async def test_successful_search_is_reused_from_bounded_memory_cache() -> None:
+    engine = FederatedSearch(settings())
+    provider = FakeProvider(
+        "web_test",
+        "web",
+        [source("Deterministic research result", "https://example.com/result", "web_test")],
+    )
+    engine._general = [provider]
+    engine._keyless_web = []
+
+    async def public(_url: str) -> bool:
+        return True
+
+    first = await engine.search(
+        "deterministic research", "web", 4, public_url_validator=public
+    )
+    first.sources[0].content = "caller-owned mutation"
+    second = await engine.search(
+        "deterministic research", "web", 4, public_url_validator=public
+    )
+
+    assert provider.calls == [("deterministic research", 4)]
+    assert second.sources[0].content == ""
+    assert len(engine._search_cache) == 1
+
+
+@pytest.mark.asyncio
 async def test_fallback_uses_safe_deduplicated_web_count() -> None:
     engine = FederatedSearch(settings(search_brave_api_key="configured"))
     duplicate_title = "One canonical configured-provider result"
