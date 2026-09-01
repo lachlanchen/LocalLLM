@@ -145,9 +145,11 @@ _STRUCTURED_QUERY_STOPWORDS = {
     "could",
     "describe",
     "explain",
+    "find",
     "for",
     "from",
     "give",
+    "help",
     "how",
     "in",
     "include",
@@ -158,6 +160,7 @@ _STRUCTURED_QUERY_STOPWORDS = {
     "on",
     "one",
     "please",
+    "search",
     "sentence",
     "sentences",
     "source",
@@ -271,9 +274,13 @@ def _structured_keyword_query(value: str) -> str:
         for token in tokens
         if len(token) > 1 and token.casefold() not in _STRUCTURED_QUERY_STOPWORDS
     ]
-    # A single token may be a CJK question with no spaces or an exact identifier;
-    # preserve the original in that case instead of over-normalizing it.
-    return " ".join(keywords[:24]) if len(keywords) >= 2 else normalized[:800]
+    if len(keywords) >= 2:
+        return " ".join(keywords[:24])
+    # Preserve a genuinely single-token CJK question or exact identifier. When
+    # chat instructions surround one topical token, keep that token alone.
+    if len(keywords) == 1 and len(tokens) > 1:
+        return keywords[0]
+    return normalized[:800]
 
 
 def _lexical_tokens(value: str) -> set[str]:
@@ -429,6 +436,33 @@ _SITE_OPERATOR_RE = re.compile(
     r"(?<![\w-])site:([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)\.?(?=$|[\s,;!?)}\]\"'])",
     flags=re.IGNORECASE,
 )
+
+
+def _query_relevance_terms(query: str) -> set[str]:
+    """Extract topical terms without chat instructions or site operators."""
+
+    lexical_query = _SITE_OPERATOR_RE.sub(" ", query)
+    return _lexical_tokens(_structured_keyword_query(lexical_query))
+
+
+def _source_is_relevant(query: str, source: ResearchSource) -> bool:
+    """Reject weak provider hits before their priors can outrank real evidence."""
+
+    terms = _query_relevance_terms(query)
+    if not terms:
+        return True
+    haystack = f"{source.title} {source.snippet} {source.url}"
+    haystack_terms = _lexical_tokens(haystack)
+    minimum_hits = 1 if len(terms) == 1 else 2
+    if len(terms & haystack_terms) >= minimum_hits:
+        return True
+    compact_query = "".join(
+        character
+        for character in _structured_keyword_query(_SITE_OPERATOR_RE.sub(" ", query)).casefold()
+        if character.isalnum()
+    )
+    compact_haystack = "".join(character for character in haystack.casefold() if character.isalnum())
+    return len(terms) >= 2 and len(compact_query) >= 6 and compact_query in compact_haystack
 
 
 def _query_site_hosts(query: str) -> tuple[str, ...]:
@@ -808,6 +842,42 @@ class GitHubRepositoriesProvider(HTTPProvider):
                 title=raw.get("full_name") or raw.get("name"),
                 url=raw.get("html_url"),
                 snippet=raw.get("description"),
+                record_id=raw.get("node_id") or raw.get("id"),
+            )
+            if item:
+                sources.append(item)
+        return sources
+
+
+class GitHubUsersProvider(HTTPProvider):
+    """Public user identities from GitHub's documented REST search endpoint."""
+
+    name = "github_users"
+    kind = "web"
+
+    async def search(self, query: str, limit: int) -> list[ResearchSource]:
+        query = _structured_keyword_query(query)
+        data = await self._json(
+            "GET",
+            "https://api.github.com/search/users",
+            params={"q": query, "per_page": min(limit, 20), "page": 1},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        records = data.get("items")
+
+        sources: list[ResearchSource] = []
+        for raw in _bounded_records(records, limit):
+            login = _plain_text(raw.get("login"), 160)
+            item = _source(
+                provider=self.name,
+                kind=self.kind,
+                query=query,
+                title=f"{login} (GitHub profile)" if login else "",
+                url=raw.get("html_url"),
+                snippet=f"Public GitHub user profile for {login}." if login else "",
                 record_id=raw.get("node_id") or raw.get("id"),
             )
             if item:
@@ -1285,6 +1355,7 @@ _PROVIDER_PRIOR = {
     "brave": 0.9,
     "tavily": 0.9,
     "serper": 0.85,
+    "github_users": 0.84,
     "wikipedia": 0.82,
     "github_repositories": 0.8,
     "hacker_news_algolia": 0.78,
@@ -1310,12 +1381,13 @@ class FederatedSearch:
         if settings.search_serper_api_key:
             self._general.append(SerperProvider(settings))
         self._keyless_web: list[SearchProvider] = [
+            YahooHtmlProvider(settings),
             WikipediaProvider(settings),
+            GitHubUsersProvider(settings),
             GitHubRepositoriesProvider(settings),
             HackerNewsAlgoliaProvider(settings),
             DuckDuckGoProvider(settings),
             BraveHtmlProvider(settings),
-            YahooHtmlProvider(settings),
             MojeekHtmlProvider(settings),
         ]
 
@@ -1338,6 +1410,7 @@ class FederatedSearch:
             "tavily": bool(self.settings.search_tavily_api_key),
             "serper": bool(self.settings.search_serper_api_key),
             "wikipedia": True,
+            "github_users": True,
             "github_repositories": True,
             "hacker_news_algolia": True,
             "duckduckgo": True,
@@ -1378,6 +1451,14 @@ class FederatedSearch:
                 True,
                 False,
                 "English Wikipedia through the official MediaWiki Action API",
+            ),
+            ProviderDescription(
+                "github_users",
+                "web",
+                True,
+                True,
+                False,
+                "Public user profiles through the GitHub REST search API",
             ),
             ProviderDescription(
                 "github_repositories",
@@ -1523,6 +1604,25 @@ class FederatedSearch:
             return [], diagnostic
 
     @staticmethod
+    def _keyless_waves(
+        providers: list[SearchProvider],
+    ) -> tuple[list[SearchProvider], list[SearchProvider]]:
+        """Run the reliable first wave before rate-prone anonymous HTML engines."""
+
+        primary_names = {
+            "yahoo_html",
+            "wikipedia",
+            "github_users",
+            "github_repositories",
+            "hacker_news_algolia",
+        }
+        primary = [provider for provider in providers if provider.name in primary_names]
+        if not primary:
+            return list(providers), []
+        secondary = [provider for provider in providers if provider.name not in primary_names]
+        return primary, secondary
+
+    @staticmethod
     def _deduplicate(sources: list[ResearchSource]) -> list[ResearchSource]:
         merged: dict[str, ResearchSource] = {}
         for source in sources:
@@ -1565,10 +1665,7 @@ class FederatedSearch:
 
     @staticmethod
     def _rank(query: str, sources: list[ResearchSource]) -> list[ResearchSource]:
-        lexical_query = _SITE_OPERATOR_RE.sub(" ", query)
-        terms = _lexical_tokens(lexical_query) - {
-            "what", "when", "where", "which", "with", "from", "that", "this"
-        }
+        terms = _query_relevance_terms(query)
         current_year = datetime.now(timezone.utc).year
         for source in sources:
             source.citation_count = _bounded_citation_count(source.citation_count)
@@ -1650,8 +1747,10 @@ class FederatedSearch:
             providers.extend(self._academic)
         # Explicitly named keyless engines provide model-independent failover while
         # retaining which public search frontend produced each result.
+        secondary_keyless: list[SearchProvider] = []
         if mode in {"web", "both"} and not self._general:
-            providers.extend(self._keyless_web)
+            primary_keyless, secondary_keyless = self._keyless_waves(self._keyless_web)
+            providers.extend(primary_keyless)
 
         # ``None`` preserves the legacy per-provider budget for existing
         # callers. Strict v2 may opt into a larger candidate pool, still under
@@ -1692,6 +1791,9 @@ class FederatedSearch:
                 deduplicated = [
                     source for source in deduplicated if _matches_query_site(source, site_hosts)
                 ]
+            deduplicated = [
+                source for source in deduplicated if _source_is_relevant(query, source)
+            ]
             candidate_limit = max(24, min(90, limit * 3))
             candidates_to_validate = self._select_diverse(
                 self._rank(query, deduplicated), mode, candidate_limit
@@ -1711,11 +1813,12 @@ class FederatedSearch:
         # Otherwise duplicate or private hits could suppress the keyless fallback and
         # leave the caller with no usable web evidence after validation.
         web_count = sum(1 for source in safe_sources if source.kind == "web")
-        if mode in {"web", "both"} and self._general and web_count < min(4, limit):
+        fallback_providers = self._keyless_web if self._general else secondary_keyless
+        if mode in {"web", "both"} and fallback_providers and web_count < min(4, limit):
             fallback_results = await asyncio.gather(
                 *(
                     self._call_provider(provider, query, per_provider_limit, semaphore)
-                    for provider in self._keyless_web
+                    for provider in fallback_providers
                 )
             )
             diagnostics.extend(item[1] for item in fallback_results)

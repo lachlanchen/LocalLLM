@@ -10,7 +10,7 @@ dependencies = [
   "pydantic-settings>=2.6,<3",
   "python-multipart>=0.0.12,<1",
   "uvicorn[standard]>=0.32,<1",
-  "ddgs>=9,<10",
+  "ddgs>=9.16,<10",
   "trafilatura>=2,<3",
   "tld>=0.13,<1",
 ]

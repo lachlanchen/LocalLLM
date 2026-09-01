@@ -128,7 +128,7 @@ def source(
     return ResearchSource(
         title="Verified source",
         url=url,
-        snippet="Bounded public evidence",
+        snippet="Bounded public evidence for verified research",
         provider=provider,
         providers=[provider],
         kind="paper",

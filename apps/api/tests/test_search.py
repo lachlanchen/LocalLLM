@@ -17,6 +17,7 @@ from localllm.search import (
     DuckDuckGoProvider,
     FederatedSearch,
     GitHubRepositoriesProvider,
+    GitHubUsersProvider,
     HackerNewsAlgoliaProvider,
     ProviderResponseError,
     ResearchSource,
@@ -74,7 +75,7 @@ def source(
     return ResearchSource(
         title=title,
         url=url,
-        snippet=f"Evidence about deterministic {title}",
+        snippet=f"Evidence about deterministic research and {title}",
         provider=provider,
         providers=[provider],
         kind=kind,
@@ -262,6 +263,40 @@ def test_structured_query_removes_chat_formatting_instructions() -> None:
         == "large language model common use"
     )
     assert _structured_keyword_query("量子计算是什么？") == "量子计算是什么？"
+    assert _structured_keyword_query("Help me search lachlan Chen") == "lachlan Chen"
+    assert _structured_keyword_query("Please search QAOA") == "QAOA"
+
+
+@pytest.mark.asyncio
+async def test_federation_rejects_partial_name_hits_from_provider_noise() -> None:
+    engine = FederatedSearch(settings())
+    relevant = ResearchSource(
+        title="Lachlan Chen - Google Scholar",
+        url="https://scholar.google.com/citations?user=example",
+        snippet="Research profile for Lachlan Chen.",
+        provider="yahoo_html",
+        providers=["yahoo_html"],
+        query="Help me search lachlan Chen",
+    )
+    partial = ResearchSource(
+        title="Anduril Industries",
+        url="https://en.wikipedia.org/wiki/Anduril_Industries",
+        snippet="A company whose long article happens to mention someone named Chen.",
+        provider="wikipedia",
+        providers=["wikipedia"],
+        query="Help search lachlan Chen",
+    )
+    engine._general = [FakeProvider("web_test", "web", [partial, relevant])]
+    engine._keyless_web = []
+
+    async def public(_url: str) -> bool:
+        return True
+
+    outcome = await engine.search(
+        "Help me search lachlan Chen", "web", 8, public_url_validator=public
+    )
+
+    assert [item.title for item in outcome.sources] == ["Lachlan Chen - Google Scholar"]
 
 
 def test_positive_site_operator_is_exact_and_subdomain_aware() -> None:
@@ -399,6 +434,37 @@ async def test_federated_search_falls_back_and_filters_unsafe_urls() -> None:
         "Some search connectors did not answer; successful fallbacks still supplied the evidence: configured"
         in outcome.warnings
     )
+
+
+@pytest.mark.asyncio
+async def test_keyless_search_defers_rate_prone_second_wave_when_primary_is_sufficient() -> None:
+    engine = FederatedSearch(settings())
+    primary = FakeProvider(
+        "yahoo_html",
+        "web",
+        [
+            source(f"Deterministic research result {index}", f"https://example.com/{index}", "yahoo_html")
+            for index in range(4)
+        ],
+    )
+    secondary = FakeProvider(
+        "duckduckgo",
+        "web",
+        [source("Deterministic research fallback", "https://fallback.example/result", "duckduckgo")],
+    )
+    engine._general = []
+    engine._keyless_web = [primary, secondary]
+
+    async def public(_url: str) -> bool:
+        return True
+
+    outcome = await engine.search(
+        "deterministic research", "web", 4, public_url_validator=public
+    )
+
+    assert len(outcome.sources) == 4
+    assert primary.calls == [("deterministic research", 4)]
+    assert secondary.calls == []
 
 
 @pytest.mark.asyncio
@@ -752,6 +818,41 @@ async def test_github_repository_provider_uses_documented_api_and_normalizes_rec
 
 
 @pytest.mark.asyncio
+async def test_github_user_provider_uses_documented_api_and_normalizes_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GitHubUsersProvider(settings())
+    captured: dict[str, Any] = {}
+
+    async def response(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        captured.update({"method": method, "url": url, **kwargs})
+        return {
+            "items": [
+                {
+                    "id": 123,
+                    "node_id": "U_profile",
+                    "login": "lachlanchen",
+                    "html_url": "https://github.com/lachlanchen?tab=repositories",
+                },
+                {"id": 999, "login": "missing-url"},
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_json", response)
+    results = await provider.search("Help me search lachlan Chen", 50)
+
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://api.github.com/search/users"
+    assert captured["params"] == {"q": "lachlan Chen", "per_page": 20, "page": 1}
+    assert captured["headers"]["Accept"] == "application/vnd.github+json"
+    assert len(results) == 1
+    assert results[0].title == "lachlanchen (GitHub profile)"
+    assert results[0].url == "https://github.com/lachlanchen?tab=repositories"
+    assert results[0].provider == "github_users"
+    assert results[0].provenance[0]["record_id"] == "U_profile"
+
+
+@pytest.mark.asyncio
 async def test_hacker_news_algolia_provider_normalizes_external_and_discussion_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -839,7 +940,7 @@ async def test_structured_keyless_failure_is_diagnostic_and_does_not_block_sibli
 def test_status_exposes_explicit_structured_keyless_provenance() -> None:
     providers = {item["name"]: item for item in FederatedSearch(settings()).status()["providers"]}
 
-    for name in ("wikipedia", "github_repositories", "hacker_news_algolia"):
+    for name in ("wikipedia", "github_users", "github_repositories", "hacker_news_algolia"):
         assert providers[name]["kind"] == "web"
         assert providers[name]["configured"] is True
         assert providers[name]["enabled"] is True
