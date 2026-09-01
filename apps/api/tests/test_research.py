@@ -378,7 +378,7 @@ async def test_official_document_request_expands_only_validated_entity_host(
                 ResearchSource(
                     "SQLite forum discussion",
                     "https://www.sqlite.org/forum/post/123",
-                    "General user conversation.",
+                    "SQLite rollback journal behavior.",
                     provider="test",
                     providers=["test"],
                 )

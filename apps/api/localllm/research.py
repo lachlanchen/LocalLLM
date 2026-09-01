@@ -732,6 +732,20 @@ class ResearchManager:
         sources = [
             source for source in sources if _source_matches_research_topic(source, relevance_terms)
         ]
+        if official_entities:
+            official_documents = [
+                source
+                for source in sources
+                if _is_entity_named_host(
+                    (urlparse(source.url).hostname or "").casefold().rstrip("."),
+                    official_entities,
+                )
+                and not (
+                    _lexical_tokens(urlparse(source.url).path) & _NON_DOCUMENT_PATH_TERMS
+                )
+            ]
+            if len({source.url for source in official_documents}) >= 2:
+                sources = official_documents
         ranked = self.search._rank(" ".join(task.queries), sources)
         if official_entities:
             for source in ranked:
