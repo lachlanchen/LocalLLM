@@ -342,7 +342,7 @@ async def speech_transcription(
     language: str = Form("auto"),
     manager: SpeechTranscriptionManager = Depends(get_speech),
 ) -> JSONResponse:
-    if set(request.query_params) - {"language"}:
+    if request.query_params:
         raise HTTPException(status_code=422, detail="Unsupported query parameter")
     media_type = (file.content_type or "").split(";", 1)[0].strip().lower()
     payload = await file.read(MAX_SPEECH_AUDIO_BYTES + 1)

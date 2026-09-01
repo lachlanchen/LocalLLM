@@ -133,6 +133,19 @@ def test_speech_transcription_rejects_unknown_query_fields(tmp_path: Path) -> No
     assert manager.calls == []
 
 
+def test_speech_transcription_rejects_language_in_query(tmp_path: Path) -> None:
+    client, manager = speech_app(tmp_path)
+
+    response = client.post(
+        "/api/speech/transcriptions?language=en",
+        headers={"authorization": "Bearer speech-test-key"},
+        files={"file": ("voice.m4a", b"\x00\x00\x00\x18ftypM4A ", "audio/mp4")},
+    )
+
+    assert response.status_code == 422
+    assert manager.calls == []
+
+
 @pytest.mark.asyncio
 async def test_manager_deletes_transient_audio_after_success(tmp_path: Path, monkeypatch) -> None:
     model = tmp_path / "model"
