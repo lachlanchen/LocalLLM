@@ -111,7 +111,8 @@ class SpeechTranscriptionManager:
         if self.settings.speech_device == "cuda" and self.settings.speech_device_index != 1:
             raise SpeechRuntimeError("speech_gpu_policy_rejected")
         if self._input_root is None:
-            self._input_root = _private_directory(self.settings.data_dir / "speech-inflight")
+            data_root = Path(os.path.abspath(os.fspath(self.settings.data_dir)))
+            self._input_root = _private_directory(data_root / "speech-inflight")
         return model_path
 
     async def _stop_worker(self) -> None:

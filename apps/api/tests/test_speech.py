@@ -168,6 +168,26 @@ async def test_manager_deletes_transient_audio_after_success(tmp_path: Path, mon
     assert list((settings.data_dir / "speech-inflight").iterdir()) == []
 
 
+def test_manager_normalizes_relative_production_data_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model = tmp_path / "model"
+    model.mkdir()
+    settings = Settings(
+        data_dir=Path("./data"),
+        speech_enabled=True,
+        speech_model_path=model,
+        speech_python_path=Path("/bin/true"),
+        speech_ffprobe_path=Path("/bin/true"),
+        speech_api_key="speech-test-key",
+        _env_file=None,
+    )
+    manager = SpeechTranscriptionManager(settings)
+
+    assert manager._validate_runtime() == model
+    assert manager._input_root == tmp_path / "data" / "speech-inflight"
+    assert manager._input_root.is_absolute()
+
+
 @pytest.mark.asyncio
 async def test_manager_fails_closed_on_media_mismatch(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "data", _env_file=None)
