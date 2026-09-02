@@ -304,7 +304,7 @@ start() {
   register_started_child "xvfb" "$child_pid" "Xvfb :$display_number"
   wait_for_x_socket "$child_pid" "$log_dir/xvfb.log"
 
-  nohup x11vnc -display ":$display_number" -localhost -nopw -forever -shared \
+  nohup x11vnc -display ":$display_number" -localhost -nopw -forever -nevershared \
     -rfbport "$vnc_port" >"$log_dir/x11vnc.log" 2>&1 &
   child_pid="$!"
   register_started_child "x11vnc" "$child_pid" "-rfbport $vnc_port"
@@ -350,7 +350,7 @@ status() {
     "http://127.0.0.1:$cdp_port/json/version" >/dev/null 2>&1 && cdp_ok="true"
   curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
     "http://127.0.0.1:$novnc_port/vnc.html" >/dev/null 2>&1 && novnc_ok="true"
-  printf '{"display":":%s","vnc":"127.0.0.1:%s","novnc":"http://127.0.0.1:%s/vnc.html?host=127.0.0.1&port=%s&autoconnect=1&resize=scale","cdp":"http://127.0.0.1:%s","cdpReady":%s,"novncReady":%s}\n' \
+  printf '{"display":":%s","vnc":"127.0.0.1:%s","novnc":"http://127.0.0.1:%s/vnc.html?host=127.0.0.1&port=%s&autoconnect=1&resize=scale&view_only=0&shared=0&reconnect=0","cdp":"http://127.0.0.1:%s","cdpReady":%s,"novncReady":%s}\n' \
     "$display_number" "$vnc_port" "$novnc_port" "$novnc_port" "$cdp_port" "$cdp_ok" "$novnc_ok"
 }
 
