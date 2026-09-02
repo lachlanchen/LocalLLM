@@ -45,6 +45,11 @@ from .mcp_bridge import investigate_with_mcp, mcp_status
 from .node_canary import ROLE_ALIASES, functional_readiness_document
 from .node_contract import node_capabilities_document, readiness_document
 from .ollama import OllamaClient, OllamaStream, OllamaTransportError
+from .qwen_tool_repair import (
+    chat_completion_sse,
+    repair_qwen_chat_completion,
+    should_buffer_qwen_tool_stream,
+)
 from .research import ResearchCapacityError, ResearchManager
 from .reverse_engineering import (
     MAX_UPLOAD_REQUEST_SIZE,
@@ -1355,6 +1360,42 @@ async def _proxy_openai(
     request: Request, endpoint: str, payload: dict[str, Any], ollama: OllamaClient
 ) -> Response:
     try:
+        if should_buffer_qwen_tool_stream(endpoint, payload):
+            # Qwen3-Coder can omit its opening <tool_call> marker. Ollama then
+            # exposes a complete call as ordinary text. Perform exactly one
+            # non-streamed upstream generation so the compatibility adapter can
+            # validate the complete block before exposing anything executable.
+            upstream_payload = dict(payload)
+            upstream_payload["stream"] = False
+            upstream_payload.pop("stream_options", None)
+            response = await _await_upstream_or_disconnect(
+                request, ollama.proxy_json(endpoint, upstream_payload)
+            )
+            if response.is_error:
+                return _openai_upstream_error(response)
+            try:
+                completion = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _openai_error(
+                    502,
+                    "The local model returned an invalid Chat Completions response.",
+                    error_code="invalid_upstream_response",
+                )
+            if not isinstance(completion, dict):
+                return _openai_error(
+                    502,
+                    "The local model returned an invalid Chat Completions response.",
+                    error_code="invalid_upstream_response",
+                )
+            completion, repaired = repair_qwen_chat_completion(payload, completion)
+            include_usage = isinstance(payload.get("stream_options"), dict) and bool(
+                payload["stream_options"].get("include_usage")
+            )
+            return StreamingResponse(
+                chat_completion_sse(completion, include_usage=include_usage),
+                media_type="text/event-stream",
+                headers={"X-LocalLLM-Tool-Repair": "applied" if repaired else "not-needed"},
+            )
         if payload.get("stream"):
             stream = await _await_upstream_or_disconnect(
                 request, ollama.proxy_stream(endpoint, payload)
@@ -1363,6 +1404,19 @@ async def _proxy_openai(
         response = await _await_upstream_or_disconnect(
             request, ollama.proxy_json(endpoint, payload)
         )
+        if endpoint == "/v1/chat/completions" and not response.is_error:
+            try:
+                completion = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                completion = None
+            if isinstance(completion, dict):
+                completion, repaired = repair_qwen_chat_completion(payload, completion)
+                if repaired:
+                    repaired_response = JSONResponse(
+                        content=completion, status_code=response.status_code
+                    )
+                    repaired_response.headers["X-LocalLLM-Tool-Repair"] = "applied"
+                    return repaired_response
         return _passthrough(response)
     except _ClientDisconnected:
         return _openai_error(499, "Client closed request", "request_cancelled")

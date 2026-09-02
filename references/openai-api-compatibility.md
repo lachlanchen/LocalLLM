@@ -74,6 +74,16 @@ localllm-embed       → bge-m3:latest
 
 - Compatibility means common request/response shapes, not identical model behavior.
 - Ollama supports a subset of OpenAI fields and tools. Unsupported fields may be ignored or rejected upstream.
+- `localllm-code` has one narrow tool-call compatibility adapter. Qwen3-Coder can
+  occasionally omit the opening `<tool_call>` marker and begin directly with a
+  complete `<function=...>` block; Ollama otherwise exposes that call as ordinary
+  assistant text. When a streamed Chat Completions request explicitly supplies
+  native tools for this model, LocalLLM performs one buffered upstream generation,
+  accepts only complete calls whose tool and parameter names were declared by the
+  request, checks required values and JSON-schema types, and emits ordinary OpenAI
+  `tool_calls` SSE chunks. Unknown, truncated, extra, or schema-invalid markup stays
+  text. This path never retries or replays generation. Other models and tool-free
+  chat retain direct streaming passthrough.
 - Ollama’s Responses API does not provide cloud conversation storage. `previous_response_id` and `conversation` are not local state stores.
 - LocalLLM does not persist `/v1/*` request bodies or proxy responses. The
   Playground uses a separate local SQLite management API under
@@ -128,6 +138,15 @@ It exercises model listing, Chat Completions (including streaming), Responses, a
 ```bash
 uv run --project apps/api --extra dev python scripts/verify-openai-api.py \
   --image /absolute/path/to/interface.png
+```
+
+The separate agent-loop conformance probe drives a streamed
+`write_fixture → read_fixture → final answer` sequence through `localllm-code`.
+Its tools operate only on an in-memory dictionary, so the probe verifies real
+multi-turn tool execution without writing model-selected paths to the host:
+
+```bash
+uv run --project apps/api --extra dev python scripts/verify-agent-tool-loop.py
 ```
 
 Streaming requests are preflighted before response headers are sent, so an upstream Ollama 4xx/5xx remains an OpenAI-shaped HTTP error instead of becoming a misleading `200` event stream.
