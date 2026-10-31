@@ -19,6 +19,16 @@ def test_unknown_model_is_preserved() -> None:
     assert resolve_model("custom/model") == "custom/model"
 
 
+def test_qwen36_has_bounded_context_without_changing_existing_aliases() -> None:
+    from localllm.grounded_chat import _model_context
+
+    assert resolve_model("localllm-qwen36") == "qwen3.6:35b-a3b"
+    assert _model_context("qwen3.6:35b-a3b") == 8192
+    assert resolve_model("localllm-fast") == "qwen3:8b-q4_K_M"
+    assert _model_context(resolve_model("localllm-fast")) == 40960
+    assert _model_context(resolve_model("localllm-deep")) == 65536
+
+
 def test_code_alias_has_exact_curated_metadata() -> None:
     coder = next(model for model in MODEL_CATALOG if model["id"] == "qwen3-coder:30b-a3b-q4_K_M")
     assert MODEL_ALIASES["localllm-code"] == coder["id"]

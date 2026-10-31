@@ -71,6 +71,16 @@ const catalog: CatalogResponse = {
 }
 
 describe('local model availability', () => {
+  it('selects Qwen3.6 on a node where it is the only installed model', () => {
+    const qwenOnly = {
+      ...catalog,
+      models: [{ ...models[0], id: 'qwen3.6:35b-a3b', installed: true }],
+      aliases: { ...catalog.aliases, 'localllm-qwen36': 'qwen3.6:35b-a3b' },
+    }
+    expect(chooseAvailableAlias(qwenOnly, 'localllm-fast', 'text')).toBe('localllm-qwen36')
+    expect(chooseAvailableAlias(qwenOnly, 'localllm-vision', 'vision')).toBe('localllm-qwen36')
+    expect(chooseAvailableAlias({ ...qwenOnly, models: [] }, 'localllm-qwen36', 'text')).toBeNull()
+  })
   it('keeps an installed preferred alias', () => {
     expect(chooseAvailableAlias(catalog, 'localllm-pocket', 'text')).toBe('localllm-pocket')
   })

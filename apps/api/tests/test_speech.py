@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -154,8 +155,8 @@ async def test_manager_deletes_transient_audio_after_success(tmp_path: Path, mon
         data_dir=tmp_path / "data",
         speech_enabled=True,
         speech_model_path=model,
-        speech_python_path=Path("/bin/true"),
-        speech_ffprobe_path=Path("/bin/true"),
+        speech_python_path=Path(sys.executable),
+        speech_ffprobe_path=Path(sys.executable),
         speech_api_key="speech-test-key",
         _env_file=None,
     )
@@ -190,8 +191,8 @@ def test_manager_normalizes_relative_production_data_root(tmp_path: Path, monkey
         data_dir=Path("./data"),
         speech_enabled=True,
         speech_model_path=model,
-        speech_python_path=Path("/bin/true"),
-        speech_ffprobe_path=Path("/bin/true"),
+        speech_python_path=Path(sys.executable),
+        speech_ffprobe_path=Path(sys.executable),
         speech_api_key="speech-test-key",
         _env_file=None,
     )

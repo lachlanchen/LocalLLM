@@ -16,7 +16,7 @@ die() {
   exit 1
 }
 
-for required_command in awk cmp find grep node sha256sum sort tr xargs; do
+for required_command in cmp grep node tr; do
   command -v "$required_command" >/dev/null || die "missing prerequisite: $required_command"
 done
 
@@ -82,18 +82,33 @@ web_source_fingerprint() {
   manifest_contract_is_valid "$project_root/apps/web/public/manifest.webmanifest" ||
     die "apps/web/public/manifest.webmanifest is invalid or incomplete"
 
-  while IFS= read -r -d '' required; do
-    inputs+=("$required")
-  done < <(
-    cd "$project_root"
-    find apps/web/src apps/web/public -type f -print0 | sort -z
-  )
-
-  ((${#inputs[@]} > 8)) || die "no web source files found"
-  (
-    cd "$project_root"
-    printf '%s\0' "${inputs[@]}" | xargs -0 sha256sum
-  ) | sha256sum | awk '{print $1}'
+  # Preserve the existing sha256sum manifest bytes without requiring GNU
+  # coreutils on macOS. Node is already required for the manifest contract.
+  node - "$project_root" "${inputs[@]}" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const root = process.argv[2]
+const files = []
+function walk(relative) {
+  for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true })) {
+    const name = `${relative}/${entry.name}`
+    if (entry.isDirectory()) walk(name)
+    else if (entry.isFile()) files.push(name)
+  }
+}
+walk('apps/web/src')
+walk('apps/web/public')
+files.sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))
+if (!files.length) throw new Error('no web source files found')
+const manifest = crypto.createHash('sha256')
+for (const name of [...process.argv.slice(3), ...files]) {
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, name))).digest('hex')
+  const escaped = name.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
+  manifest.update(`${escaped === name ? '' : '\\'}${digest}  ${escaped}\n`)
+}
+console.log(manifest.digest('hex'))
+NODE
 }
 
 dist_completeness_error() {

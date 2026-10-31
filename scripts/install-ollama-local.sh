@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
+  echo "install-ollama-local: this pinned installer supports Linux x86_64 only; install the native Ollama build and set LOCALLLM_OLLAMA_BIN" >&2
+  exit 1
+fi
+
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 install_dir="$project_root/.local/ollama"
 download_dir="$project_root/.local/downloads"

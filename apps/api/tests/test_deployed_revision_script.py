@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 def run(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -50,6 +53,7 @@ def test_deployed_revision_gate_accepts_only_the_exact_clean_worktree(tmp_path: 
     assert "not clean" in untracked.stderr
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux systemd credential gate uses GNU stat and POSIX ACL tools")
 def test_private_credential_gate_rejects_replaceable_or_aliased_sources(tmp_path: Path) -> None:
     root = Path(__file__).parents[3]
     gate = root / "scripts" / "verify-private-credential-source.sh"
