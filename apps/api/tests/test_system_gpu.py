@@ -5,6 +5,8 @@ import pytest
 
 from localllm import system
 
+pytestmark = pytest.mark.asyncio
+
 
 @pytest.mark.parametrize("metal_key,metal_value", [
     ("spdisplays_mtlgpufamilysupport", "spdisplays_metal4"),
