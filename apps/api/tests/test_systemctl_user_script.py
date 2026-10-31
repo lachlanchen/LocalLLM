@@ -3,15 +3,26 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def short_socket_root():
+    # Darwin's AF_UNIX limit is 104 bytes; pytest's normal macOS temp path can
+    # exceed it before the socket name is appended. Keep the real socket test.
+    with tempfile.TemporaryDirectory(prefix="llm-bus-", dir="/tmp") as directory:
+        yield Path(directory)
 
 
 def test_systemctl_user_uses_canonical_runtime_bus(
-    tmp_path: Path,
+    tmp_path: Path, short_socket_root: Path,
 ) -> None:
     root = Path(__file__).parents[3]
     wrapper = root / "scripts" / "systemctl-user.sh"
-    runtime = tmp_path / "runtime"
+    runtime = short_socket_root / "runtime"
     runtime.mkdir()
     bus_path = runtime / "bus"
     fake_bin = tmp_path / "bin"

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,27 @@ async def _command(*args: str, timeout: float = 5.0) -> tuple[int, str]:
 
 
 async def gpu_status() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        code, output = await _command("system_profiler", "SPDisplaysDataType", "-json")
+        devices = []
+        try:
+            displays = json.loads(output).get("SPDisplaysDataType", []) if code == 0 else []
+            for display in displays:
+                metal = display.get("spdisplays_mtlgpufamilysupport", display.get("spdisplays_metal", ""))
+                if isinstance(metal, str) and (
+                    metal.startswith("spdisplays_metal") or metal == "spdisplays_supported"
+                ):
+                    devices.append({"index": len(devices),
+                                    "name": display.get("sppci_model", display.get("_name", "Apple GPU")),
+                                    "metal_support": metal})
+        except (ValueError, AttributeError, TypeError):
+            devices = []
+        # Hardware capability only. Model readiness remains a separate Ollama probe;
+        # unified memory is not reported as invented dedicated VRAM measurements.
+        return {"ok": bool(devices), "backend": "metal", "devices": devices,
+                "diagnosis": "Metal hardware detected; model readiness is reported separately"
+                if devices else "Metal hardware could not be verified"}
+
     code, output = await _command(
         "nvidia-smi",
         "--query-gpu=index,name,memory.total,memory.used,memory.free,temperature.gpu,power.draw",

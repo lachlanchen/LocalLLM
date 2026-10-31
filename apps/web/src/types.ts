@@ -6,6 +6,7 @@ export interface ModelInfo {
   quantization: string
   size_gb: number
   context: number
+  runtime_context?: number
   modalities: string[]
   tier: string
   role: string
@@ -25,14 +26,16 @@ export interface SystemStatus {
   service: { ok: boolean; version: string }
   gpu: {
     ok: boolean
+    backend?: 'metal'
     devices: Array<{
       index: number
       name: string
-      memory_total_mb: number
-      memory_used_mb: number
-      memory_free_mb: number
-      temperature_c: number
-      power_w: number
+      memory_total_mb?: number
+      memory_used_mb?: number
+      memory_free_mb?: number
+      temperature_c?: number
+      power_w?: number
+      metal_support?: string
     }>
     error?: string
     diagnosis?: string

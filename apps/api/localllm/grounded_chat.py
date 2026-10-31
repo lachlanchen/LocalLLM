@@ -782,7 +782,7 @@ def _model_has_modality(model: str, modality: str) -> bool | None:
 def _model_context(model: str) -> int:
     for item in MODEL_CATALOG:
         if item["id"] == model:
-            return min(65_536, max(8_192, int(item.get("context", 32_768))))
+            return min(65_536, max(8_192, int(item.get("runtime_context", item.get("context", 32_768)))))
     return 32_768
 
 

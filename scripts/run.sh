@@ -4,6 +4,16 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
+api_python=""
+if [[ "$(uname -s)" == Darwin ]]; then
+  export PATH="$project_root/.local/bin:$project_root/.local/node/bin:$PATH"
+  api_python="${LOCALLLM_API_PYTHON:-$project_root/.venv/bin/python}"
+  if [[ ! -x "$api_python" ]]; then
+    echo "run: set LOCALLLM_API_PYTHON to the Python executable with the LocalLLM API dependencies installed" >&2
+    exit 1
+  fi
+fi
+
 scripts/ensure-web-dist.sh --ensure
 
 ollama_pid=""
@@ -27,7 +37,12 @@ if ! curl -fsS http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
   done
 fi
 
-uv run --project apps/api uvicorn localllm.main:app \
-  --app-dir apps/api --host 127.0.0.1 --port 8008 &
+if [[ -n "$api_python" ]]; then
+  "$api_python" -m uvicorn localllm.main:app \
+    --app-dir apps/api --host 127.0.0.1 --port 8008 &
+else
+  uv run --project apps/api uvicorn localllm.main:app \
+    --app-dir apps/api --host 127.0.0.1 --port 8008 &
+fi
 api_pid="$!"
 wait "$api_pid"

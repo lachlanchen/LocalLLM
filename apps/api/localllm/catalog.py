@@ -4,6 +4,18 @@ from typing import Any
 
 MODEL_CATALOG: list[dict[str, Any]] = [
     {
+        "id": "qwen3.6:35b-a3b",
+        "family": "Qwen3.6 35B-A3B",
+        "quantization": "4-bit (runtime-selected)",
+        "size_gb": 24.0,
+        "context": 262144,
+        "runtime_context": 8192,
+        "modalities": ["text", "image", "tools"],
+        "tier": "Qwen3.6",
+        "role": "35B mixture-of-experts chat and vision; bounded 8K app context",
+        "recommended": False,
+    },
+    {
         "id": "qwen3:4b-q4_K_M",
         "family": "Qwen3 4B",
         "quantization": "Q4_K_M",
@@ -127,6 +139,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
 ]
 
 MODEL_ALIASES = {
+    "localllm-qwen36": "qwen3.6:35b-a3b",
     "localllm-pocket": "qwen3:4b-q4_K_M",
     "localllm-fast": "qwen3:8b-q4_K_M",
     "localllm-balanced": "qwen3:8b-q8_0",

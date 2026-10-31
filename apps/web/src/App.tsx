@@ -218,10 +218,10 @@ function StatusDot({ ok }: { ok?: boolean }) {
   return <span className={`status-dot ${ok ? 'is-ok' : 'is-off'}`} />
 }
 
-function AppHeader({ status, onRefresh }: { status: SystemStatus | null; onRefresh: () => void }) {
+export function AppHeader({ status, onRefresh }: { status: SystemStatus | null; onRefresh: () => void }) {
   const gpuLabel = status?.gpu.ok
-    ? `${status.gpu.devices.length} GPU${status.gpu.devices.length === 1 ? '' : 's'} ready`
-    : 'GPU needs attention'
+    ? status.gpu.backend === 'metal' ? 'Metal supported' : `${status.gpu.devices.length} GPU${status.gpu.devices.length === 1 ? '' : 's'} ready`
+    : status?.gpu.backend === 'metal' ? 'Metal status unavailable' : 'GPU needs attention'
   return (
     <header className="topbar">
       <div className="crumb">
@@ -1790,14 +1790,14 @@ function ResearchView({ catalog }: { catalog: CatalogResponse | null }) {
 
 interface ModelPullState { value: number; status: string; failed?: boolean }
 
-function ModelCard({ model, progress, onPull }: { model: ModelInfo; progress?: ModelPullState; onPull: (model: string) => void }) {
+export function ModelCard({ model, progress, onPull }: { model: ModelInfo; progress?: ModelPullState; onPull: (model: string) => void }) {
   const color = model.modalities.includes('image') ? 'violet' : model.modalities.includes('embedding') ? 'teal' : model.family.includes('30B') ? 'orange' : model.family.includes('8B') ? 'teal' : 'yellow'
   return (
     <article className={`model-card ${color}`}>
       <div className="model-top"><span className="model-tier">{model.tier}</span>{model.recommended && <span className="recommended"><Sparkles size={12} /> PICK</span>}</div>
       <div className="model-icon">{model.modalities.includes('image') ? <Aperture size={25} /> : model.modalities.includes('embedding') ? <Search size={25} /> : model.family.includes('30B') ? <Layers3 size={25} /> : <BrainCircuit size={25} />}</div>
       <h3>{model.family}</h3><code>{model.quantization}</code><p>{model.role}</p>
-      <div className="model-stats"><div><strong>{model.size_gb} GB</strong><span>ON DISK</span></div><div><strong>{Math.round(model.context / 1024)}K</strong><span>CONTEXT</span></div><div><strong>{model.modalities.includes('image') ? 'VISION' : model.modalities.includes('embedding') ? 'EMBED' : 'TEXT'}</strong><span>MODE</span></div></div>
+      <div className="model-stats"><div><strong>{model.size_gb} GB</strong><span>ON DISK</span></div><div title={model.runtime_context ? `Model maximum: ${Math.round(model.context / 1024)}K; app limit: ${Math.round(model.runtime_context / 1024)}K` : undefined}><strong>{Math.round((model.runtime_context ?? model.context) / 1024)}K</strong><span>{model.runtime_context ? 'APP CONTEXT' : 'CONTEXT'}</span></div><div><strong>{model.modalities.includes('image') ? 'VISION' : model.modalities.includes('embedding') ? 'EMBED' : 'TEXT'}</strong><span>MODE</span></div></div>
       {progress?.failed ? <div className="download-progress is-failed"><span>{progress.status}</span><button className="download-button" onClick={() => onPull(model.id)}><RefreshCw size={14} /> Retry download</button></div> : progress ? <div className="download-progress"><div><span>{progress.status}</span><strong>{progress.value}%</strong></div><div className="progress-bar"><span style={{ width: `${progress.value}%` }} /></div></div> : <button className={model.installed ? 'installed-button' : 'download-button'} onClick={() => !model.installed && onPull(model.id)} disabled={model.installed}>{model.installed ? <><Check size={16} /> Installed</> : <><Download size={16} /> Pull model</>}</button>}
     </article>
   )
@@ -1825,11 +1825,11 @@ function ModelsView({ catalog, refresh }: { catalog: CatalogResponse | null; ref
   const installed = catalog?.models.filter((model) => model.installed).length ?? 0
   return (
     <section className="padded-view models-view">
-      <div className="models-header"><HeroTitle eyebrow="CURATED FOR DUAL RTX 4090" title="A shelf with" accent="a point of view." copy="Keep Q4 for speed and Q8 for fidelity. Every preset maps to a named Ollama tag with a visible quantization—no mystery choices." /><div className="library-summary"><div><HardDrive size={19} /><span><strong>{catalog?.planned_download_gb ?? '—'} GB</strong> complete set</span></div><div><Check size={19} /><span><strong>{installed}/{catalog?.models.length ?? 0}</strong> installed</span></div></div></div>
+      <div className="models-header"><HeroTitle eyebrow="LOCAL MODEL PRESETS" title="A shelf with" accent="a point of view." copy="Compare model sizes and quantizations, then install the presets that fit your machine. Installed models are ready to select in chat." /><div className="library-summary"><div><HardDrive size={19} /><span><strong>{catalog?.planned_download_gb ?? '—'} GB</strong> complete set</span></div><div><Check size={19} /><span><strong>{installed}/{catalog?.models.length ?? 0}</strong> installed</span></div></div></div>
       {catalog?.ollama?.ok === false && <div className="inline-error"><Activity size={15} />Model runtime unavailable: {catalog.ollama.error ?? 'Ollama did not answer.'}</div>}
       <div className="filter-row"><div>{(['all', 'text', 'vision', 'embedding'] as const).map((item) => <button key={item} className={filter === item ? 'is-active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><button className="icon-text-button" onClick={() => void refresh()}><RefreshCw size={15} /> Refresh</button></div>
       <div className="model-grid">{models.map((model) => <ModelCard key={model.id} model={model} progress={pulls[model.id]} onPull={(id) => void pull(id)} />)}</div>
-      <div className="quant-note"><Gauge size={24} /><div><strong>Why both quantizations?</strong><p>Q4_K_M is the daily driver: less VRAM, larger KV cache, faster startup. Q8_0 is the comparison lane when small accuracy differences matter. The 30B Q8 is intended for this dual-card host, but Ollama decides live placement from context size and available memory.</p></div></div>
+      <div className="quant-note"><Gauge size={24} /><div><strong>Choosing a model</strong><p>Start with a model that fits your available memory. Q4 presets use less memory; Q8 presets offer a fidelity comparison. Larger models may need multiple GPUs or substantial unified memory. Ollama selects placement, and the app context limit may be lower than the model maximum.</p></div></div>
     </section>
   )
 }

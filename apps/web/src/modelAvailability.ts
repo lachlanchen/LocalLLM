@@ -12,6 +12,7 @@ export interface ModelChoiceStatus extends ModelChoice {
 }
 
 export const TEXT_MODEL_CHOICES: readonly ModelChoice[] = [
+  { alias: 'localllm-qwen36', label: 'Qwen3.6 35B · 8K context' },
   { alias: 'localllm-fast', label: 'Qwen3 8B · Fast' },
   { alias: 'localllm-balanced', label: 'Qwen3 8B · Q8' },
   { alias: 'localllm-deep', label: 'Qwen3 30B · Deep' },
@@ -22,6 +23,7 @@ export const TEXT_MODEL_CHOICES: readonly ModelChoice[] = [
 ]
 
 export const VISION_MODEL_CHOICES: readonly ModelChoice[] = [
+  { alias: 'localllm-qwen36', label: 'Qwen3.6 35B · 8K context' },
   { alias: 'localllm-vision', label: 'Qwen3-VL 8B · Q4' },
   { alias: 'localllm-vision-max', label: 'Qwen3-VL 8B · Q8' },
   { alias: 'localllm-vision-xl', label: 'Qwen3-VL 30B · XL' },
